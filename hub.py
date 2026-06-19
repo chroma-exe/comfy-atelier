@@ -1,5 +1,8 @@
+import json
+
 import folder_paths
-import comfy.sd
+
+from .loader import load_checkpoint
 
 
 class AtelierHub:
@@ -8,23 +11,32 @@ class AtelierHub:
         return {
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
-                # ※ inert in v0.1. the module layer will act on this list, never on widget presence. see docs/blueprints/hub-node.md
-                "enabled_modules": ("STRING", {"default": "", "multiline": False}),
+                "checkpoints": ("STRING", {"default": "", "multiline": False}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "VAE")
-    RETURN_NAMES = ("model", "clip", "vae")
+    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "ROSTER")
+    RETURN_NAMES = ("model", "clip", "vae", "roster")
     FUNCTION = "load"
     CATEGORY = "atelier"
 
-    def load(self, ckpt_name, enabled_modules="", unique_id=None):
-        ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
-        model, clip, vae = comfy.sd.load_checkpoint_guess_config(
-            ckpt_path,
-            output_vae=True,
-            output_clip=True,
-            embedding_directory=folder_paths.get_folder_paths("embeddings"),
-        )[:3]
-        return (model, clip, vae)
+    def load(self, ckpt_name, checkpoints="", unique_id=None):
+        model, clip, vae = load_checkpoint(ckpt_name)
+        roster = [{"ckpt": ckpt_name, "loras": []}] + _parse_slots(checkpoints)
+        print(f"[atelier] hub roster: {[e['ckpt'] for e in roster]}")
+        return (model, clip, vae, roster)
+
+
+def _parse_slots(raw):
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    # this one field is the source of truth - behavior never gets inferred from widget
+    # presence. that's the anti-ghost contract.
+    slots = []
+    for item in json.loads(raw):
+        ckpt = item.get("ckpt")
+        if ckpt:
+            slots.append({"ckpt": ckpt, "loras": item.get("loras", [])})
+    return slots
