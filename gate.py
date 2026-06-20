@@ -1,6 +1,6 @@
 import comfy.model_management as model_management
 
-from .loader import load_checkpoint
+from .loader import load_checkpoint, apply_loras
 
 
 class AtelierPassGate:
@@ -39,4 +39,5 @@ class AtelierPassGate:
             model_management.unload_all_models()
         print(f"[atelier] pass gate -> slot {slot}: {ckpt}" + (" (vram freed first)" if free_vram_first else ""))
         model, clip, vae = load_checkpoint(ckpt)
+        model, clip = apply_loras(model, clip, roster[slot].get("loras", []))
         return (model, clip, vae)
