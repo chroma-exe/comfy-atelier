@@ -1,5 +1,6 @@
 from .hub import AtelierHub
 from .gate import AtelierPassGate
+from . import info  # noqa: F401 - imported for its side effect: registers the /atelier routes
 
 NODE_CLASS_MAPPINGS = {
     "AtelierHub": AtelierHub,
