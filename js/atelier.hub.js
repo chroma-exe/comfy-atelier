@@ -1,5 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { openLoraInfo } from "./atelier.lorainfo.js";
 
 const HUB_CLASS = "AtelierHub";
 const STATE = "checkpoints"; // the json field the backend reads - single source of truth
@@ -76,9 +77,12 @@ function drawRow(ctx, w, node, width, y) {
     const e = w.value;
     const m = 10;
     const midY = y + ROW_H * 0.5;
-    const togEnd = m + 18;
+    const SW = 22, SH = 12; // flip-switch track
+    const togEnd = m + SW + 6;
     const zoneW = 64;
     const zoneX = width - m - zoneW;
+    const infoW = e.lora ? 22 : 0; // the info glyph only earns its spot once there's a lora to inspect
+    const infoX = zoneX - infoW;
 
     ctx.save();
     ctx.fillStyle = "rgba(255,255,255,0.05)";
@@ -86,9 +90,14 @@ function drawRow(ctx, w, node, width, y) {
     ctx.roundRect(m, y + 1, width - 2 * m, ROW_H - 2, 6);
     ctx.fill();
 
+    // flip switch - drawn at full alpha so the on/off state reads even on a dimmed (off) row
     ctx.beginPath();
-    ctx.arc(m + 9, midY, 6, 0, Math.PI * 2);
-    ctx.fillStyle = e.on ? ACCENT : "rgba(255,255,255,0.16)";
+    ctx.roundRect(m, midY - SH / 2, SW, SH, SH / 2);
+    ctx.fillStyle = e.on ? ACCENT : "rgba(255,255,255,0.18)";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(e.on ? m + SW - SH / 2 : m + SH / 2, midY, SH / 2 - 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = "#fff";
     ctx.fill();
 
     ctx.globalAlpha = e.on ? 1 : 0.4;
@@ -101,16 +110,33 @@ function drawRow(ctx, w, node, width, y) {
     ctx.fillText((e.strength ?? 1).toFixed(2), zoneX + 32, midY);
     ctx.fillText("▸", zoneX + 57, midY);
 
+    if (e.lora) {
+        const cx = infoX + 10;
+        ctx.strokeStyle = "rgba(255,255,255,0.4)";
+        ctx.fillStyle = "rgba(255,255,255,0.72)";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(cx, midY, 7, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx, midY - 3, 1, 0, Math.PI * 2); // the dot of the i
+        ctx.fill();
+        ctx.beginPath();
+        ctx.roundRect(cx - 0.9, midY - 1, 1.8, 5, 0.9); // the stem of the i
+        ctx.fill();
+    }
+
     ctx.textAlign = "left";
-    ctx.fillText(fit(ctx, e.lora || "click to choose a lora…", zoneX - 6 - togEnd), togEnd, midY);
+    ctx.fillText(fit(ctx, e.lora || "click to choose a lora…", infoX - 6 - togEnd), togEnd, midY);
     ctx.restore();
 
     w.__hit = {
         tog: [m, togEnd],
+        info: e.lora ? [infoX, zoneX] : null,
         dec: [zoneX, zoneX + 14],
         val: [zoneX + 14, zoneX + 50],
         inc: [zoneX + 50, zoneX + 64],
-        name: [togEnd, zoneX - 6],
+        name: [togEnd, infoX - 6],
     };
 }
 
@@ -128,12 +154,14 @@ function rowMouse(event, pos, node, w) {
     if (!h) return;
     const e = w.value;
     const x = pos[0];
-    const hit = (r) => x >= r[0] && x <= r[1];
+    const hit = (r) => r && x >= r[0] && x <= r[1];
     const redraw = () => {
         sync(node);
         node.setDirtyCanvas(true, true);
     };
-    if (hit(h.tog)) {
+    if (hit(h.info)) {
+        openLoraInfo(e.lora);
+    } else if (hit(h.tog)) {
         e.on = !e.on;
         redraw();
     } else if (hit(h.dec)) {

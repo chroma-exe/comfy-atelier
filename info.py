@@ -107,6 +107,20 @@ async def _fetch_civitai(sha):
         return None
 
 
+_META_FIELDS = ("prompt", "negativePrompt", "sampler", "scheduler", "seed", "steps", "cfgScale", "clipSkip", "denoise", "Model")
+
+
+def _image_meta(meta):
+    # civitai stuffs the whole comfy workflow into meta sometimes - keep only the readable gen params
+    if not isinstance(meta, dict):
+        return None
+    out = {k: meta[k] for k in _META_FIELDS if meta.get(k) not in (None, "")}
+    w, h = meta.get("width"), meta.get("height")
+    if w and h:
+        out["size"] = f"{w}x{h}"
+    return out or None
+
+
 def _merge_civitai(info, data):
     info["civitai"] = True
     model = data.get("model") or {}
@@ -127,7 +141,7 @@ def _merge_civitai(info, data):
     for img in data.get("images") or []:
         url = img.get("url")
         if url:
-            info["images"].append({"url": url, "width": img.get("width"), "height": img.get("height"), "nsfw": img.get("nsfwLevel")})
+            info["images"].append({"url": url, "width": img.get("width"), "height": img.get("height"), "nsfw": img.get("nsfwLevel"), "meta": _image_meta(img.get("meta"))})
 
     model_id, ver_id = data.get("modelId"), data.get("id")
     if model_id:
