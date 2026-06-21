@@ -24,8 +24,8 @@ class AtelierHub:
     def load(self, ckpt_name, checkpoints="", unique_id=None):
         state = _parse_state(checkpoints)
         model, clip, vae = load_checkpoint(ckpt_name)
-        model, clip = apply_loras(model, clip, state["main_loras"])
-        roster = [{"ckpt": ckpt_name, "loras": state["main_loras"]}] + state["slots"]
+        model, clip = apply_loras(model, clip, [l for l in state["main_loras"] if l["on"]])
+        roster = [{"ckpt": ckpt_name, "on": True, "loras": state["main_loras"]}] + state["slots"]
         print(f"[atelier] hub roster: {[e['ckpt'] for e in roster]}")
         return (model, clip, vae, roster)
 
@@ -44,7 +44,7 @@ def _parse_state(raw):
     for item in data.get("slots", []):
         ckpt = item.get("ckpt")
         if ckpt:
-            slots.append({"ckpt": ckpt, "loras": _clean_loras(item.get("loras"))})
+            slots.append({"ckpt": ckpt, "on": bool(item.get("on", True)), "loras": _clean_loras(item.get("loras"))})
     return {"main_loras": _clean_loras(data.get("main_loras")), "slots": slots}
 
 
@@ -53,5 +53,10 @@ def _clean_loras(raw):
     for l in raw or []:
         name = l.get("lora")
         if name:
-            out.append({"on": bool(l.get("on", True)), "lora": name, "strength": float(l.get("strength", 1.0))})
+            out.append({
+                "on": bool(l.get("on", True)),
+                "force": bool(l.get("force", False)),
+                "lora": name,
+                "strength": float(l.get("strength", 1.0)),
+            })
     return out

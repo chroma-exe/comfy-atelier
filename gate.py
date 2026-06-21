@@ -32,12 +32,32 @@ class AtelierPassGate:
     def load_slot(self, roster, slot, free_vram_first=True, run_after=None):
         if not 0 <= slot < len(roster):
             raise ValueError(f"pass gate: slot {slot} out of range (roster holds {len(roster)} checkpoint(s))")
-        ckpt = roster[slot]["ckpt"]
-        if free_vram_first:
-            # ※ a 10gb card can't hold two checkpoints at once, so evict before the next lands.
-            # unloads ALL models - grows a keep-loaded option if a pass ever needs something warm.
-            model_management.unload_all_models()
-        print(f"[atelier] pass gate -> slot {slot}: {ckpt}" + (" (vram freed first)" if free_vram_first else ""))
-        model, clip, vae = load_checkpoint(ckpt)
-        model, clip = apply_loras(model, clip, roster[slot].get("loras", []))
+        entry = roster[slot]
+        if entry.get("on", True):
+            ckpt = entry["ckpt"]
+            loras = [l for l in entry.get("loras", []) if l.get("on", True)]
+            if free_vram_first:
+                # ※ a 10gb card can't hold two checkpoints at once, so evict before the next lands.
+                # unloads ALL models - grows a keep-loaded option if a pass ever needs something warm.
+                model_management.unload_all_models()
+            print(f"[atelier] pass gate -> slot {slot}: {ckpt}" + (" (vram freed first)" if free_vram_first else ""))
+            model, clip, vae = load_checkpoint(ckpt)
+        else:
+            # off slot: don't evict, don't reload, inherit the resident checkpoint. forced loras
+            # REPLACE the inherited stack (they don't stack on top) - none forced means inherit it whole.
+            src = _inherit_source(roster, slot)
+            ckpt = roster[src]["ckpt"]
+            forced = [l for l in entry.get("loras", []) if l.get("force")]
+            loras = forced or [l for l in roster[src].get("loras", []) if l.get("on", True)]
+            kind = f"{len(forced)} forced (override)" if forced else f"{len(loras)} inherited"
+            print(f"[atelier] pass gate -> slot {slot} off, inherits slot {src}: {ckpt} ({kind})")
+            model, clip, vae = load_checkpoint(ckpt, reuse=True)
+        model, clip = apply_loras(model, clip, loras)
         return (model, clip, vae)
+
+
+def _inherit_source(roster, slot):
+    for i in range(slot - 1, -1, -1):
+        if roster[i].get("on", True):
+            return i
+    return 0

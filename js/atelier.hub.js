@@ -3,10 +3,19 @@ import { api } from "../../scripts/api.js";
 import { openLoraInfo } from "./atelier.lorainfo.js";
 
 const HUB_CLASS = "AtelierHub";
-const STATE = "checkpoints"; // the json field the backend reads - single source of truth
-const DYN = "__atelier_dyn";
-const ROW_H = 22;
-const ACCENT = "#ff6b5c";
+const STATE = "checkpoints";   // the json blob the backend reads - single source of truth
+const MAINCKPT = "ckpt_name";  // hidden stock combo: holds the main checkpoint + the file list
+
+// palette
+const C = {
+    txt: "#ece9f5", dim: "#9a93b4", accent: "#ff6b5c", gold: "#ffd36b",
+    stroke: "rgba(255,255,255,0.10)", inset: "rgba(0,0,0,0.22)",
+};
+// flat on purpose - a gradient sheen here reads fake. one number is the whole glass
+const GLASS = { fill: "#14121e", alpha: 0.82 };
+
+// layout, px, node-local
+const M = 9, GAP = 9, HEAD_H = 26, CK_H = 24, ROW_H = 22, PADB = 8, ADD_H = 30, TOP = 4;
 
 let _loras = null;
 async function loraList() {
@@ -22,240 +31,532 @@ async function loraList() {
 }
 
 function ckptList(node) {
-    return node.widgets?.find((w) => w.name === "ckpt_name")?.options?.values ?? [];
+    return node.widgets?.find((w) => w.name === MAINCKPT)?.options?.values ?? [];
 }
-
-function parseState(raw) {
-    const empty = { main_loras: [], slots: [] };
-    if (!raw) return empty;
-    let d;
-    try {
-        d = JSON.parse(raw);
-    } catch {
-        return empty;
-    }
-    if (Array.isArray(d)) d = { main_loras: [], slots: d }; // phase 2 shipped a bare slot array
-    return {
-        main_loras: cleanLoras(d.main_loras),
-        slots: (d.slots ?? []).map((s) => ({ ckpt: s.ckpt ?? "", loras: cleanLoras(s.loras) })),
-    };
+function mainCkpt(node) {
+    return node.widgets?.find((w) => w.name === MAINCKPT)?.value ?? "";
+}
+function bodyOf(node) {
+    return node.widgets?.find((w) => w.name === "__atelier_body");
+}
+function baseName(p) {
+    if (!p) return "";
+    const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+    return (i < 0 ? p : p.slice(i + 1)).replace(/\.safetensors$/, "");
 }
 
 function cleanLoras(arr) {
     return (arr ?? []).map((l) => ({
         on: l.on !== false,
+        force: !!l.force,
         lora: l.lora ?? "",
         strength: typeof l.strength === "number" ? l.strength : 1.0,
     }));
 }
 
-function sync(node) {
-    const w = node.widgets?.find((w) => w.name === STATE);
-    if (w) w.value = JSON.stringify({ main_loras: node.__atelier.main_loras, slots: node.__atelier.slots });
+function parseState(raw) {
+    const empty = { main_label: "main", main_loras: [], slots: [] };
+    if (!raw) return empty;
+    let d;
+    try { d = JSON.parse(raw); } catch { return empty; }
+    if (Array.isArray(d)) d = { main_loras: [], slots: d }; // phase 2 shipped a bare slot array
+    return {
+        main_label: d.main_label || "main",
+        main_loras: cleanLoras(d.main_loras),
+        slots: (d.slots ?? []).map((s) => ({ ckpt: s.ckpt ?? "", on: s.on !== false, label: s.label ?? "", loras: cleanLoras(s.loras) })),
+    };
 }
 
-function resize(node, width = node.size[0]) {
-    // computeSize returns the *minimum* box; addWidget auto-collapses to it first, so floor at the
-    // width the user dragged to instead of replacing it. height tracks row count, which is intended.
+function sync(node) {
+    const w = node.widgets?.find((w) => w.name === STATE);
+    if (w) w.value = JSON.stringify({ main_label: node.__a.main_label, main_loras: node.__a.main_loras, slots: node.__a.slots });
+}
+
+function newLora() {
+    return { on: true, force: false, lora: "", strength: 1.0 };
+}
+
+function cardHeight(loras) {
+    return HEAD_H + CK_H + loras.length * ROW_H + PADB;
+}
+function bodyHeight(node) {
+    const A = node.__a;
+    if (!A) return ROW_H; // body widget only mounts after __a is set; this is just belt-and-suspenders
+    let h = TOP + cardHeight(A.main_loras) + GAP;
+    for (const s of A.slots) h += cardHeight(s.loras) + GAP;
+    return h + ADD_H;
+}
+
+function resize(node) {
+    // computeSize returns the minimum box; addWidget collapses to it, so floor at the dragged width.
+    const w = node.size[0];
     const min = node.computeSize();
-    node.setSize([Math.max(width, min[0]), min[1]]);
+    node.setSize([Math.max(w, min[0]), min[1]]);
+}
+function commit(node) {
+    sync(node);
+    resize(node);
+    node.setDirtyCanvas(true, true);
 }
 
 function hide(w) {
     if (!w) return;
     w.hidden = true;
-    w.computeSize = () => [0, -4]; // keep the widget so its value still serializes; just stop drawing it
+    w.computeSize = () => [0, -4]; // keep it so the value still serializes; just stop drawing it
 }
 
 function fit(ctx, str, max) {
+    if (max <= 0) return "";
     if (ctx.measureText(str).width <= max) return str;
     while (str.length && ctx.measureText(str + "…").width > max) str = str.slice(0, -1);
     return str + "…";
 }
 
-function drawRow(ctx, w, node, width, y) {
-    const e = w.value;
-    const m = 10;
-    const midY = y + ROW_H * 0.5;
-    const SW = 22, SH = 12; // flip-switch track
-    const togEnd = m + SW + 6;
-    const zoneW = 64;
-    const zoneX = width - m - zoneW;
-    const infoW = e.lora ? 22 : 0; // the info glyph only earns its spot once there's a lora to inspect
-    const infoX = zoneX - infoW;
+// mirrors the gate's _inherit_source - the two have to agree or the preview lies about the roster
+function inheritedSrc(node, slotIdx) {
+    for (let i = slotIdx - 1; i >= 0; i--) {
+        const s = node.__a.slots[i];
+        if (s.on) return { ckpt: s.ckpt, count: s.loras.filter((l) => l.on).length };
+    }
+    return { ckpt: mainCkpt(node), count: node.__a.main_loras.filter((l) => l.on).length };
+}
+
+// real translucent glass: fill the whole node at globalAlpha < 1 (so the canvas + wires bleed
+// through) and DON'T call the original drawNodeShape - the original paints an opaque body first,
+// which is the lie. then redraw the title with the node's own methods; litegraph draws the slots
+// after this returns. recipe lifted from the niutonian glassmorphism theme.
+function drawHubShape(node, ctx, size, selected) {
+    if (!node.drawTitleBox || !node.drawTitleText) throw new Error("no title methods on this litegraph");
+    const collapsed = node.flags?.collapsed;
+    const titleH = LiteGraph.NODE_TITLE_HEIGHT || 30;
+    const w = collapsed ? (node._collapsed_width || LiteGraph.NODE_COLLAPSED_WIDTH || 80) : size[0];
+    const top = -titleH, full = collapsed ? titleH : size[1] + titleH, r = 11;
 
     ctx.save();
-    ctx.fillStyle = "rgba(255,255,255,0.05)";
-    ctx.beginPath();
-    ctx.roundRect(m, y + 1, width - 2 * m, ROW_H - 2, 6);
+    ctx.shadowColor = "rgba(0,0,0,0.45)"; ctx.shadowBlur = 22; ctx.shadowOffsetY = selected ? 0 : 6;
+    ctx.beginPath(); ctx.roundRect(0, top, w, full, r);
+    ctx.globalAlpha = GLASS.alpha;
+    ctx.fillStyle = GLASS.fill;
     ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
 
-    // flip switch - drawn at full alpha so the on/off state reads even on a dimmed (off) row
-    ctx.beginPath();
-    ctx.roundRect(m, midY - SH / 2, SW, SH, SH / 2);
-    ctx.fillStyle = e.on ? ACCENT : "rgba(255,255,255,0.18)";
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(e.on ? m + SW - SH / 2 : m + SH / 2, midY, SH / 2 - 1.5, 0, Math.PI * 2);
-    ctx.fillStyle = "#fff";
-    ctx.fill();
-
-    ctx.globalAlpha = e.on ? 1 : 0.4;
-    ctx.fillStyle = LiteGraph.WIDGET_TEXT_COLOR;
-    ctx.textBaseline = "middle";
-    ctx.font = `${LiteGraph.NODE_TEXT_SIZE || 12}px Arial`;
-
-    ctx.textAlign = "center";
-    ctx.fillText("◂", zoneX + 7, midY);
-    ctx.fillText((e.strength ?? 1).toFixed(2), zoneX + 32, midY);
-    ctx.fillText("▸", zoneX + 57, midY);
-
-    if (e.lora) {
-        const cx = infoX + 10;
-        ctx.strokeStyle = "rgba(255,255,255,0.4)";
-        ctx.fillStyle = "rgba(255,255,255,0.72)";
-        ctx.lineWidth = 1.2;
-        ctx.beginPath();
-        ctx.arc(cx, midY, 7, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(cx, midY - 3, 1, 0, Math.PI * 2); // the dot of the i
-        ctx.fill();
-        ctx.beginPath();
-        ctx.roundRect(cx - 0.9, midY - 1, 1.8, 5, 0.9); // the stem of the i
-        ctx.fill();
+    // drift-blob echo - faint color blooms clipped inside the glass (can't blur behind a node on canvas)
+    ctx.save();
+    ctx.beginPath(); ctx.roundRect(0, top, w, full, r); ctx.clip();
+    for (const [bx, by, br, c0, c1] of [
+        [w * 0.16, top + full * 0.88, full * 0.7, "rgba(255,107,92,0.07)", "rgba(255,107,92,0)"],
+        [w * 0.86, top + full * 0.12, full * 0.5, "rgba(124,107,255,0.08)", "rgba(124,107,255,0)"],
+        [w * 0.6, top + full * 0.5, full * 0.55, "rgba(255,211,107,0.05)", "rgba(255,211,107,0)"],
+    ]) {
+        const rg = ctx.createRadialGradient(bx, by, 0, bx, by, br);
+        rg.addColorStop(0, c0); rg.addColorStop(1, c1);
+        ctx.fillStyle = rg; ctx.fillRect(0, top, w, full);
     }
-
-    ctx.textAlign = "left";
-    ctx.fillText(fit(ctx, e.lora || "click to choose a lora…", infoX - 6 - togEnd), togEnd, midY);
     ctx.restore();
 
-    w.__hit = {
-        tog: [m, togEnd],
-        info: e.lora ? [infoX, zoneX] : null,
-        dec: [zoneX, zoneX + 14],
-        val: [zoneX + 14, zoneX + 50],
-        inc: [zoneX + 50, zoneX + 64],
-        name: [togEnd, infoX - 6],
+    ctx.beginPath(); ctx.roundRect(0.5, top + 0.5, w - 1, full - 1, r);
+    ctx.strokeStyle = selected ? "rgba(255,107,92,0.6)" : "rgba(255,255,255,0.13)";
+    ctx.lineWidth = selected ? 1.5 : 1; ctx.stroke();
+
+    // lit top edge - the dialog's inset highlight, faked as a hairline of light
+    ctx.beginPath(); ctx.moveTo(r, top + 1); ctx.lineTo(w - r, top + 1);
+    ctx.strokeStyle = "rgba(255,255,255,0.16)"; ctx.lineWidth = 1; ctx.stroke();
+
+    if (!collapsed) {
+        ctx.strokeStyle = "rgba(255,107,92,0.35)"; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(10, 0.5); ctx.lineTo(w - 10, 0.5); ctx.stroke();
+    }
+    ctx.restore();
+
+    if (node.onDrawBackground) node.onDrawBackground(ctx);
+    const opts = { scale: this.ds?.scale || 1, low_quality: this.low_quality || false };
+    node.drawTitleBox(ctx, { ...opts, box_size: 10 });
+    node.drawTitleText(ctx, { ...opts, default_title_color: "#ffb7ac" });
+    node.onDrawTitle?.(ctx);
+}
+
+let _glassInstalled = false;
+function installGlass() {
+    if (_glassInstalled || typeof LGraphCanvas === "undefined") return;
+    _glassInstalled = true;
+    const orig = LGraphCanvas.prototype.drawNodeShape;
+    LGraphCanvas.prototype.drawNodeShape = function (node, ctx, size, fgcolor, bgcolor, selected, mouse_over) {
+        if (node?.comfyClass !== HUB_CLASS) return orig.apply(this, arguments);
+        try { return drawHubShape.call(this, node, ctx, size, selected); }
+        catch { return orig.apply(this, arguments); } // fall back to a plain (opaque) node, never break
     };
 }
 
+// --- micro-animations: one raf per node while anything's mid-move, time-based so it self-settles ---
+const SLIDE_MS = 190, TAP_MS = 100;
+const ease = (t) => 1 - (1 - t) ** 3;
+function keepAnimating(node) {
+    if (node.__raf) return;
+    node.__raf = requestAnimationFrame(() => { node.__raf = null; node.setDirtyCanvas(true, true); });
+}
+// 0..1 eased toward target, keyed per (obj, key). recaptures from-current when the target flips, so
+// reversing mid-flight never jumps
+const tweens = new WeakMap();
+function curve(a) {
+    const t = (performance.now() - a.t0) / a.ms;
+    return t >= 1 ? a.target : a.from + (a.target - a.from) * ease(t);
+}
+function anim(node, obj, key, target, ms) {
+    let m = tweens.get(obj); if (!m) tweens.set(obj, m = {});
+    let a = m[key];
+    if (!a) { m[key] = { from: target, target, t0: 0, ms }; return target; }
+    if (a.target !== target) m[key] = a = { from: curve(a), target, t0: performance.now(), ms };
+    const v = curve(a);
+    if (v !== target) keepAnimating(node);
+    return v;
+}
+// keyed by glyph center - it redraws identical every frame, so the pressed control finds itself
+function tap(node, cx, cy) {
+    const p = node.__tap;
+    if (!p) return 1;
+    const t = (performance.now() - p.t0) / TAP_MS;
+    if (t >= 1) { node.__tap = null; return 1; }
+    if (Math.abs(p.x - cx) > 3 || Math.abs(p.y - cy) > 3) return 1;
+    keepAnimating(node);
+    return 1 - Math.sin(Math.PI * t) * 0.06;
+}
+function scaled(ctx, s, cx, cy, fn) {
+    if (s === 1) return fn();
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(s, s); ctx.translate(-cx, -cy); fn(); ctx.restore();
+}
+
+// --- tiny canvas glyphs (we own every pixel here) ---
+function grad(ctx, x, y, w, h, a, b) {
+    const g = ctx.createLinearGradient(x, y, x + w, y + h);
+    g.addColorStop(0, a); g.addColorStop(1, b);
+    return g;
+}
+function drawSwitch(ctx, node, obj, x, mid, on) {
+    const SW = 24, SH = 13, p = anim(node, obj, "sw", on ? 1 : 0, SLIDE_MS);
+    ctx.beginPath(); ctx.roundRect(x, mid - SH / 2, SW, SH, SH / 2);
+    ctx.fillStyle = "rgba(255,255,255,0.18)"; ctx.fill();
+    if (p > 0) {
+        ctx.save(); ctx.globalAlpha = p;
+        ctx.beginPath(); ctx.roundRect(x, mid - SH / 2, SW, SH, SH / 2);
+        ctx.fillStyle = grad(ctx, x, mid - SH / 2, SW, SH, C.accent, "#ff8f5c"); ctx.fill();
+        ctx.restore();
+    }
+    ctx.beginPath(); ctx.arc(x + SH / 2 + p * (SW - SH), mid, SH / 2 - 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = "#fff"; ctx.fill();
+}
+function drawBolt(ctx, cx, cy, col) {
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(cx + 1, cy - 5); ctx.lineTo(cx - 3, cy + 1); ctx.lineTo(cx, cy + 1);
+    ctx.lineTo(cx - 1, cy + 5); ctx.lineTo(cx + 3, cy - 1); ctx.lineTo(cx, cy - 1);
+    ctx.closePath(); ctx.fill();
+}
+function drawForce(ctx, node, x, mid, on) {
+    const FW = 24, FH = 15;
+    scaled(ctx, tap(node, x + FW / 2, mid), x + FW / 2, mid, () => {
+        ctx.beginPath(); ctx.roundRect(x, mid - FH / 2, FW, FH, 5);
+        if (on) { ctx.fillStyle = C.gold; ctx.fill(); }
+        else { ctx.lineWidth = 1; ctx.strokeStyle = C.stroke; ctx.stroke(); }
+        drawBolt(ctx, x + FW / 2, mid, on ? "#1a1410" : C.dim);
+    });
+}
+function drawInfo(ctx, node, cx, mid, hot) {
+    scaled(ctx, tap(node, cx, mid), cx, mid, () => {
+        ctx.lineWidth = 1.2;
+        ctx.save();
+        if (hot) { ctx.shadowColor = C.accent; ctx.shadowBlur = 9; }
+        ctx.strokeStyle = hot ? C.accent : "rgba(255,255,255,0.4)";
+        ctx.beginPath(); ctx.arc(cx, mid, 7, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = hot ? C.accent : "rgba(255,255,255,0.72)";
+        ctx.beginPath(); ctx.arc(cx, mid - 3, 1, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.roundRect(cx - 0.9, mid - 1, 1.8, 5, 0.9); ctx.fill();
+    });
+}
+function drawStep(ctx, node, cx, mid, glyph, hot) {
+    scaled(ctx, tap(node, cx, mid), cx, mid, () => {
+        if (hot) { ctx.beginPath(); ctx.arc(cx, mid, 9, 0, Math.PI * 2); ctx.fillStyle = "rgba(255,255,255,0.10)"; ctx.fill(); }
+        ctx.fillStyle = hot ? C.txt : C.dim; ctx.font = "12px Arial";
+        ctx.fillText(glyph, cx, mid);
+    });
+}
+function drawGrip(ctx, x, mid, col) {
+    ctx.fillStyle = col;
+    for (let c = 0; c < 2; c++) for (let r = 0; r < 3; r++) {
+        ctx.beginPath(); ctx.arc(x + c * 4, mid - 4 + r * 4, 1.1, 0, Math.PI * 2); ctx.fill();
+    }
+}
+function inZone(hx, hy, x0, y0, x1, y1) {
+    return hx >= x0 && hx <= x1 && hy >= y0 && hy <= y1;
+}
+function drawIco(ctx, node, cx, mid, o) {
+    scaled(ctx, tap(node, cx, mid), cx, mid, () => {
+        if (o.hot) {
+            const b = o.box ?? 22;
+            ctx.beginPath(); ctx.roundRect(cx - b / 2, mid - b / 2, b, b, b <= 18 ? 6 : 7);
+            ctx.fillStyle = o.danger ? "rgba(255,107,92,0.14)" : "rgba(255,255,255,0.09)"; ctx.fill();
+        }
+        ctx.save();
+        ctx.globalAlpha = o.hot ? 1 : o.a;
+        ctx.strokeStyle = o.hot ? (o.danger ? "#ff8f7e" : C.txt) : C.dim;
+        ctx.lineWidth = 1.4;
+        if (o.kind === "x") {
+            if (o.rot) { ctx.translate(cx, mid); ctx.rotate(o.rot * Math.PI / 2); ctx.translate(-cx, -mid); }
+            ctx.beginPath(); ctx.moveTo(cx - 3.5, mid - 3.5); ctx.lineTo(cx + 3.5, mid + 3.5); ctx.moveTo(cx + 3.5, mid - 3.5); ctx.lineTo(cx - 3.5, mid + 3.5); ctx.stroke();
+        } else {
+            ctx.beginPath(); ctx.moveTo(cx - 4, mid); ctx.lineTo(cx + 4, mid); ctx.moveTo(cx, mid - 4); ctx.lineTo(cx, mid + 4); ctx.stroke();
+        }
+        ctx.restore();
+    });
+}
+function drawChev(ctx, cx, cy, col) {
+    ctx.strokeStyle = col; ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.moveTo(cx - 3, cy - 1.5); ctx.lineTo(cx, cy + 1.5); ctx.lineTo(cx + 3, cy - 1.5); ctx.stroke();
+}
+function drawUp(ctx, cx, cy, col) {
+    ctx.strokeStyle = col; ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.moveTo(cx, cy + 4); ctx.lineTo(cx, cy - 4); ctx.moveTo(cx - 3, cy - 1); ctx.lineTo(cx, cy - 4); ctx.lineTo(cx + 3, cy - 1); ctx.stroke();
+}
+
+function drawLoraRow(ctx, node, card, inh, loras, l, li, cl, cr, ry, zones, hx, hy) {
+    const mid = ry + ROW_H / 2;
+    const active = inh ? l.force : l.on;
+    const hover = hy >= ry && hy < ry + ROW_H && hx >= cl && hx <= cr;
+    if (hover) {
+        ctx.beginPath(); ctx.roundRect(cl - 3, ry + 1, cr - cl + 6, ROW_H - 2, 7);
+        ctx.fillStyle = "rgba(255,255,255,0.05)"; ctx.fill();
+    }
+
+    let x = cl;
+    if (inh) {
+        drawForce(ctx, node, x, mid, l.force);
+        zones.push({ x0: x, y0: ry + 2, x1: x + 24, y1: ry + ROW_H - 2, fn: () => { l.force = !l.force; commit(node); } });
+    } else {
+        drawSwitch(ctx, node, l, x, mid, l.on);
+        zones.push({ x0: x, y0: ry + 2, x1: x + 24, y1: ry + ROW_H - 2, fn: () => { l.on = !l.on; commit(node); } });
+    }
+    x += 33;
+
+    let rx = cr;
+    drawIco(ctx, node, rx - 7, mid, { a: hover ? 1 : 0.3, hot: inZone(hx, hy, rx - 15, ry + 2, rx, ry + ROW_H - 2), kind: "x", danger: true, box: 18 });
+    zones.push({ x0: rx - 15, y0: ry + 2, x1: rx, y1: ry + ROW_H - 2, fn: () => { loras.splice(li, 1); commit(node); } });
+    rx -= 20;
+
+    const stepW = 56, sx = rx - stepW;
+    ctx.beginPath(); ctx.roundRect(sx, mid - 9, stepW, 18, 9);
+    ctx.fillStyle = C.inset; ctx.fill(); ctx.lineWidth = 1; ctx.strokeStyle = C.stroke; ctx.stroke();
+    ctx.globalAlpha = active ? 1 : 0.5; ctx.textAlign = "center";
+    drawStep(ctx, node, sx + 9, mid, "‹", inZone(hx, hy, sx, ry + 2, sx + 18, ry + ROW_H - 2));
+    ctx.fillStyle = C.gold; ctx.font = "600 11px 'Bricolage Grotesque', Arial"; ctx.fillText((l.strength ?? 1).toFixed(2), sx + stepW / 2, mid);
+    drawStep(ctx, node, sx + stepW - 9, mid, "›", inZone(hx, hy, sx + stepW - 18, ry + 2, sx + stepW, ry + ROW_H - 2));
+    ctx.globalAlpha = 1;
+    zones.push({ x0: sx, y0: ry + 2, x1: sx + 18, y1: ry + ROW_H - 2, fn: () => { l.strength = Math.round(((l.strength ?? 1) - 0.05) * 100) / 100; commit(node); } });
+    zones.push({ x0: sx + 18, y0: ry + 2, x1: sx + stepW - 18, y1: ry + ROW_H - 2, fn: (e) => app.canvas.prompt("Strength", l.strength ?? 1, (v) => { l.strength = Number(v) || 0; commit(node); }, e) });
+    zones.push({ x0: sx + stepW - 18, y0: ry + 2, x1: sx + stepW, y1: ry + ROW_H - 2, fn: () => { l.strength = Math.round(((l.strength ?? 1) + 0.05) * 100) / 100; commit(node); } });
+    rx = sx - 7;
+
+    if (l.lora) {
+        drawInfo(ctx, node, rx - 8, mid, inZone(hx, hy, rx - 16, ry + 2, rx, ry + ROW_H - 2));
+        zones.push({ x0: rx - 16, y0: ry + 2, x1: rx, y1: ry + ROW_H - 2, fn: () => openLoraInfo(l.lora) });
+        rx -= 20;
+    }
+
+    ctx.textAlign = "left"; ctx.globalAlpha = active ? 1 : 0.5;
+    ctx.fillStyle = l.lora ? C.txt : C.dim;
+    ctx.font = (l.lora ? "12px" : "italic 12px") + " 'Hanken Grotesk', Arial";
+    ctx.fillText(fit(ctx, l.lora ? baseName(l.lora) : "click to choose a lora…", rx - x - 6), x, mid);
+    ctx.globalAlpha = 1;
+    zones.push({ x0: x, y0: ry + 2, x1: rx - 4, y1: ry + ROW_H - 2, fn: (e) => chooseLora(e, (v) => { if (typeof v === "string") { l.lora = v; commit(node); } }) });
+}
+
+function drawCard(ctx, node, card, width, cy, zones, hx, hy) {
+    const A = node.__a;
+    const isMain = card.kind === "main";
+    const slot = card.slot;
+    const loras = isMain ? A.main_loras : slot.loras;
+    const inh = !isMain && !slot.on;
+    const h = cardHeight(loras);
+    const x0 = M, x1 = width - M;
+    const hover = hy >= cy && hy < cy + h && hx >= x0 && hx <= x1;
+
+    // 1px lift, visual only - zones stay at the logical y or the hover boundary flickers
+    ctx.save(); ctx.translate(0, hover ? -1 : 0);
+    ctx.beginPath(); ctx.roundRect(x0, cy, x1 - x0, h, 12);
+    ctx.fillStyle = hover ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.035)";
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = inh ? "rgba(255,211,107,0.22)" : isMain ? "rgba(255,107,92,0.22)" : (hover ? "rgba(255,255,255,0.16)" : C.stroke);
+    ctx.stroke();
+    if (isMain || inh) {
+        ctx.beginPath(); ctx.roundRect(x0 + 4, cy + 10, 2.5, h - 20, 2);
+        ctx.fillStyle = isMain ? grad(ctx, x0, cy + 10, 0, h - 20, C.accent, "#ff9a6b") : grad(ctx, x0, cy + 10, 0, h - 20, C.gold, "#e0a44d");
+        ctx.fill();
+    }
+
+    const cl = x0 + 12, cr = x1 - 11;
+    const headMid = cy + HEAD_H / 2;
+    ctx.textBaseline = "middle";
+
+    let hxp = cl;
+    if (!isMain) {
+        drawGrip(ctx, hxp, headMid, C.dim); // ※ placeholder - drag is parked, the grip does nothing on purpose
+        hxp += 14;
+        drawSwitch(ctx, node, slot, hxp, headMid, slot.on);
+        zones.push({ x0: hxp, y0: cy + 2, x1: hxp + 24, y1: cy + HEAD_H - 2, fn: () => { slot.on = !slot.on; commit(node); } });
+        hxp += 32;
+    }
+
+    const label = isMain ? (A.main_label || "main") : (slot.label || ("pass " + (card.i + 1)));
+    ctx.font = "600 13px 'Bricolage Grotesque', Arial"; ctx.fillStyle = inh ? C.dim : C.txt; ctx.textAlign = "left";
+    const labelText = fit(ctx, label, cr - hxp - 52);
+    ctx.fillText(labelText, hxp, headMid);
+    const lw = ctx.measureText(labelText).width;
+    zones.push({ x0: hxp, y0: cy, x1: hxp + lw + 4, y1: cy + HEAD_H, fn: (e) => renameCard(node, card, e) });
+
+    let tx = cr;
+    if (!isMain) {
+        const xHot = inZone(hx, hy, tx - 16, cy + 2, tx, cy + HEAD_H - 2);
+        drawIco(ctx, node, tx - 7, headMid, { a: hover ? 1 : 0.4, hot: xHot, kind: "x", danger: true, rot: anim(node, slot, "spin", xHot ? 1 : 0, 220) });
+        zones.push({ x0: tx - 16, y0: cy + 2, x1: tx, y1: cy + HEAD_H - 2, fn: () => { A.slots.splice(card.i, 1); commit(node); } });
+        tx -= 22;
+    }
+    drawIco(ctx, node, tx - 7, headMid, { a: hover ? 1 : 0.45, hot: inZone(hx, hy, tx - 16, cy + 2, tx, cy + HEAD_H - 2), kind: "plus" });
+    zones.push({ x0: tx - 16, y0: cy + 2, x1: tx, y1: cy + HEAD_H - 2, fn: () => { loras.push(newLora()); commit(node); } });
+
+    const ckY = cy + HEAD_H, ckMid = ckY + CK_H / 2;
+    ctx.beginPath(); ctx.roundRect(cl, ckY + 2, cr - cl, CK_H - 6, 8);
+    ctx.fillStyle = inh ? "rgba(255,211,107,0.06)" : C.inset; ctx.fill();
+    if (!inh) { ctx.lineWidth = 1; ctx.strokeStyle = C.stroke; ctx.stroke(); }
+    ctx.font = "12px 'Hanken Grotesk', Arial"; ctx.textAlign = "left";
+    if (inh) {
+        drawUp(ctx, cl + 10, ckMid, C.gold);
+        ctx.fillStyle = "#cdbf9a";
+        const src = inheritedSrc(node, card.i);
+        const forced = loras.filter((l) => l.force).length;
+        const tail = forced ? `  · ${forced} forced` : (src.count ? `  +${src.count} lora` : "");
+        ctx.fillText(fit(ctx, "inherits · " + baseName(src.ckpt) + tail, cr - cl - 30), cl + 20, ckMid);
+    } else {
+        const ck = isMain ? mainCkpt(node) : slot.ckpt;
+        ctx.fillStyle = "#cfc9de";
+        ctx.fillText(fit(ctx, baseName(ck) || "choose checkpoint…", cr - cl - 24), cl + 10, ckMid);
+        drawChev(ctx, cr - 10, ckMid, C.dim);
+        zones.push({ x0: cl, y0: ckY + 2, x1: cr, y1: ckY + CK_H - 4, fn: (e) => chooseCkpt(node, card, e) });
+    }
+
+    let ly = ckY + CK_H;
+    loras.forEach((l, li) => { drawLoraRow(ctx, node, card, inh, loras, l, li, cl, cr, ly, zones, hx, hy); ly += ROW_H; });
+    ctx.restore();
+    return cy + h;
+}
+
+function drawAdd(ctx, node, width, cy, zones, hx, hy) {
+    const x0 = M, x1 = width - M, h = ADD_H - 6, y = cy + 2;
+    const hover = hy >= cy && hy < cy + ADD_H && hx >= x0 && hx <= x1;
+    const cx = (x0 + x1) / 2, mid = cy + ADD_H / 2;
+    scaled(ctx, tap(node, cx, mid), cx, mid, () => {
+        ctx.beginPath(); ctx.roundRect(x0, y, x1 - x0, h, h / 2);
+        ctx.fillStyle = hover ? "rgba(255,107,92,0.10)" : "rgba(255,255,255,0.04)"; ctx.fill();
+        ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+        ctx.strokeStyle = hover ? "rgba(255,107,92,0.4)" : "rgba(255,255,255,0.18)"; ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = hover ? "#ffd0c8" : C.txt; ctx.font = "600 13px 'Hanken Grotesk', Arial";
+        ctx.fillText("＋  Add", cx, y + h / 2);
+    });
+    zones.push({ x0, y0: cy, x1, y1: cy + ADD_H, fn: (e) => addMenu(node, e) });
+}
+
+function drawBody(ctx, node, width, y0, w) {
+    const A = node.__a;
+    const zones = [];
+    const hov = node.__hover, hx = hov ? hov[0] : -1, hy = hov ? hov[1] : -1;
+    ctx.save();
+    let cy = y0 + TOP;
+    cy = drawCard(ctx, node, { kind: "main" }, width, cy, zones, hx, hy) + GAP;
+    A.slots.forEach((s, i) => { cy = drawCard(ctx, node, { kind: "slot", slot: s, i }, width, cy, zones, hx, hy) + GAP; });
+    drawAdd(ctx, node, width, cy, zones, hx, hy);
+    ctx.restore();
+    w.__zones = zones;
+}
+
+function bodyMouse(e, pos, node, w) {
+    // the dispatcher fires this on down, move AND up - only act on the press
+    if (e.type !== "pointerdown" && e.type !== "mousedown") return;
+    const zs = w.__zones;
+    if (!zs) return false;
+    const x = pos[0], y = pos[1];
+    for (let i = zs.length - 1; i >= 0; i--) {
+        const z = zs[i];
+        if (x >= z.x0 && x <= z.x1 && y >= z.y0 && y <= z.y1) {
+            node.__tap = { x: (z.x0 + z.x1) / 2, y: (z.y0 + z.y1) / 2, t0: performance.now() };
+            keepAnimating(node);
+            z.fn(e);
+            return true;
+        }
+    }
+    return false; // empty space falls through so the node still drags by its body
+}
+
+// --- choosers (the dark filtered menu is our one interaction grammar) ---
 function chooseLora(event, cb) {
-    // className "dark" is the magic word: comfy's ContextMenuFilter extension only adds the
-    // "Filter list" search box to dark menus with >4 items. without it, hundreds of loras = a wall.
     const scale = Math.max(1, app.canvas?.ds?.scale ?? 1);
     loraList().then((list) => new LiteGraph.ContextMenu(list, { event, scale, className: "dark", title: "choose a lora", callback: cb }));
 }
-
-function rowMouse(event, pos, node, w) {
-    // the dispatcher calls this on down, move AND up - only act on the press
-    if (event.type !== "pointerdown" && event.type !== "mousedown") return;
-    const h = w.__hit;
-    if (!h) return;
-    const e = w.value;
-    const x = pos[0];
-    const hit = (r) => r && x >= r[0] && x <= r[1];
-    const redraw = () => {
-        sync(node);
-        node.setDirtyCanvas(true, true);
-    };
-    if (hit(h.info)) {
-        openLoraInfo(e.lora);
-    } else if (hit(h.tog)) {
-        e.on = !e.on;
-        redraw();
-    } else if (hit(h.dec)) {
-        e.strength = Math.round(((e.strength ?? 1) - 0.05) * 100) / 100;
-        redraw();
-    } else if (hit(h.inc)) {
-        e.strength = Math.round(((e.strength ?? 1) + 0.05) * 100) / 100;
-        redraw();
-    } else if (hit(h.val)) {
-        app.canvas.prompt("Strength", e.strength ?? 1, (v) => {
-            e.strength = Number(v) || 0;
-            redraw();
-        }, event);
-    } else if (hit(h.name)) {
-        chooseLora(event, (v) => {
-            if (typeof v === "string") {
-                e.lora = v;
-                redraw();
-            }
-        });
-    }
-    return true;
-}
-
-function loraRow(node, entry) {
-    const w = { name: "lora", type: "custom", value: entry, serialize: false, [DYN]: true };
-    w.computeSize = () => [node.size[0], ROW_H];
-    w.draw = (ctx, n, width, y) => drawRow(ctx, w, n, width, y);
-    w.mouse = (e, p, n) => rowMouse(e, p, n, w);
-    node.widgets.push(w);
-    return w;
-}
-
-function addBtn(node, label, cb) {
-    const w = node.addWidget("button", label, null, cb, { serialize: false });
-    w[DYN] = true;
-    return w;
-}
-
-function addCombo(node, slot, idx) {
-    const list = ckptList(node);
-    const w = node.addWidget("combo", `checkpoint ${idx + 2}`, slot.ckpt || list[0], (v) => {
-        slot.ckpt = v;
-        sync(node);
-    }, { values: list, serialize: false });
-    w[DYN] = true;
-    return w;
-}
-
-function newLora() {
-    return { on: true, lora: "", strength: 1.0 };
-}
-
-function rebuild(node) {
-    const width = node.size[0]; // grab before the rebuild auto-collapses to min
-    node.widgets = (node.widgets ?? []).filter((w) => !w[DYN]);
-    const M = node.__atelier;
-
-    for (const e of M.main_loras) loraRow(node, e);
-    addBtn(node, "+ Add Lora", () => {
-        M.main_loras.push(newLora());
-        rebuild(node);
-        sync(node);
+function chooseCkpt(node, card, event) {
+    const scale = Math.max(1, app.canvas?.ds?.scale ?? 1);
+    new LiteGraph.ContextMenu(ckptList(node), {
+        event, scale, className: "dark", title: "choose a checkpoint",
+        callback: (v) => {
+            if (typeof v !== "string") return;
+            if (card.kind === "main") { const wd = node.widgets.find((wd) => wd.name === MAINCKPT); if (wd) wd.value = v; }
+            else card.slot.ckpt = v;
+            commit(node);
+        },
     });
+}
+function renameCard(node, card, event) {
+    const cur = card.kind === "main" ? (node.__a.main_label || "main") : (card.slot.label || "");
+    app.canvas.prompt("Label", cur, (v) => {
+        const t = (v || "").trim();
+        if (card.kind === "main") node.__a.main_label = t || "main";
+        else card.slot.label = t;
+        commit(node);
+    }, event);
+}
+function addMenu(node, event) {
+    const items = [
+        { content: "Checkpoint", callback: () => { node.__a.slots.push({ ckpt: ckptList(node)[0] || "", on: true, label: "", loras: [] }); commit(node); } },
+        { content: "Lora", has_submenu: true, callback: (v, opts, e, parent) => loraSubmenu(node, e, parent) },
+        null,
+        { content: "VAE override", disabled: true },
+        { content: "Clip skip", disabled: true },
+    ];
+    new LiteGraph.ContextMenu(items, { event, className: "dark", title: "add to hub" });
+}
+function loraSubmenu(node, event, parent) {
+    const items = [{ content: node.__a.main_label || "main", callback: () => { node.__a.main_loras.push(newLora()); commit(node); } }];
+    node.__a.slots.forEach((s, i) => items.push({ content: s.label || ("pass " + (i + 1)), callback: () => { s.loras.push(newLora()); commit(node); } }));
+    new LiteGraph.ContextMenu(items, { event, className: "dark", title: "add lora to", parentMenu: parent });
+}
 
-    M.slots.forEach((slot, i) => {
-        addCombo(node, slot, i);
-        for (const e of slot.loras) loraRow(node, e);
-        addBtn(node, "+ Add Lora", () => {
-            slot.loras.push(newLora());
-            rebuild(node);
-            sync(node);
-        });
-        addBtn(node, "remove ✕", () => {
-            M.slots.splice(i, 1);
-            rebuild(node);
-            sync(node);
-        });
-    });
-
-    addBtn(node, "+ Add Checkpoint", () => {
-        M.slots.push({ ckpt: ckptList(node)[0] || "", loras: [] });
-        rebuild(node);
-        sync(node);
-    });
-
-    resize(node, width);
+function bodyWidget(node) {
+    const w = { name: "__atelier_body", type: "custom", serialize: false };
+    w.computeSize = () => [Math.max(node.size?.[0] ?? 340, 300), bodyHeight(node)];
+    w.draw = (ctx, n, width, y) => drawBody(ctx, n, width, y, w);
+    w.mouse = (e, pos, n) => bodyMouse(e, pos, n, w);
+    return w;
 }
 
 function mount(node) {
+    installGlass();
     hide(node.widgets?.find((w) => w.name === STATE));
+    hide(node.widgets?.find((w) => w.name === MAINCKPT));
     loraList();
-    node.__atelier = parseState(node.widgets?.find((w) => w.name === STATE)?.value);
-    rebuild(node);
+    node.__a = parseState(node.widgets?.find((w) => w.name === STATE)?.value);
+    if (!bodyOf(node)) node.widgets.push(bodyWidget(node));
+    node.onMouseMove = function (e, pos) { this.__hover = pos; this.setDirtyCanvas(true); };
+    node.onMouseLeave = function () { this.__hover = null; this.setDirtyCanvas(true); };
+    resize(node);
 }
 
 app.registerExtension({
