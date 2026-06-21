@@ -1,6 +1,6 @@
 import comfy.model_management as model_management
 
-from .loader import load_checkpoint, apply_loras
+from .loader import load_checkpoint, apply_loras, apply_overrides
 
 
 class AtelierPassGate:
@@ -36,6 +36,7 @@ class AtelierPassGate:
         if entry.get("on", True):
             ckpt = entry["ckpt"]
             loras = [l for l in entry.get("loras", []) if l.get("on", True)]
+            overrides = entry
             if free_vram_first:
                 # ※ a 10gb card can't hold two checkpoints at once, so evict before the next lands.
                 # unloads ALL models - grows a keep-loaded option if a pass ever needs something warm.
@@ -45,14 +46,17 @@ class AtelierPassGate:
         else:
             # off slot: don't evict, don't reload, inherit the resident checkpoint. forced loras
             # REPLACE the inherited stack (they don't stack on top) - none forced means inherit it whole.
+            # vae/clip-skip ride along too: an off slot wears the source's overrides, not its own.
             src = _inherit_source(roster, slot)
-            ckpt = roster[src]["ckpt"]
+            overrides = roster[src]
+            ckpt = overrides["ckpt"]
             forced = [l for l in entry.get("loras", []) if l.get("force")]
-            loras = forced or [l for l in roster[src].get("loras", []) if l.get("on", True)]
+            loras = forced or [l for l in overrides.get("loras", []) if l.get("on", True)]
             kind = f"{len(forced)} forced (override)" if forced else f"{len(loras)} inherited"
             print(f"[atelier] pass gate -> slot {slot} off, inherits slot {src}: {ckpt} ({kind})")
             model, clip, vae = load_checkpoint(ckpt, reuse=True)
         model, clip = apply_loras(model, clip, loras)
+        clip, vae = apply_overrides(clip, vae, overrides)
         return (model, clip, vae)
 
 

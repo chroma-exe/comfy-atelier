@@ -1,5 +1,6 @@
 import folder_paths
 import comfy.sd
+import comfy.utils
 from nodes import LoraLoader
 
 
@@ -35,3 +36,18 @@ def apply_loras(model, clip, loras):
             continue
         model, clip = loader.load_lora(model, clip, name, strength, strength)
     return model, clip
+
+
+def load_vae(vae_name):
+    sd = comfy.utils.load_torch_file(folder_paths.get_full_path_or_raise("vae", vae_name))
+    return comfy.sd.VAE(sd=sd)
+
+
+def apply_overrides(clip, vae, entry):
+    if entry.get("vae"):
+        vae = load_vae(entry["vae"])
+    skip = entry.get("clip_skip")
+    if skip is not None:
+        clip = clip.clone()
+        clip.clip_layer(int(skip))
+    return clip, vae

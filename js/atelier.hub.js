@@ -30,6 +30,20 @@ async function loraList() {
     return _loras;
 }
 
+let _vaes = null;
+async function vaeList() {
+    if (_vaes) return _vaes;
+    try {
+        const r = await api.fetchApi("/object_info/VAELoader");
+        const j = await r.json();
+        // taesd* are pseudo-entries the backend's plain load_vae can't open, so don't offer them
+        _vaes = (j?.VAELoader?.input?.required?.vae_name?.[0] ?? []).filter((v) => !v.startsWith("taesd"));
+    } catch {
+        _vaes = [];
+    }
+    return _vaes;
+}
+
 function ckptList(node) {
     return node.widgets?.find((w) => w.name === MAINCKPT)?.options?.values ?? [];
 }
@@ -54,8 +68,12 @@ function cleanLoras(arr) {
     }));
 }
 
+function cleanSkip(v) {
+    return typeof v === "number" ? v : null;
+}
+
 function parseState(raw) {
-    const empty = { main_label: "main", main_loras: [], slots: [] };
+    const empty = { main_label: "main", main_loras: [], main_vae: null, main_clip_skip: null, slots: [] };
     if (!raw) return empty;
     let d;
     try { d = JSON.parse(raw); } catch { return empty; }
@@ -63,27 +81,49 @@ function parseState(raw) {
     return {
         main_label: d.main_label || "main",
         main_loras: cleanLoras(d.main_loras),
-        slots: (d.slots ?? []).map((s) => ({ ckpt: s.ckpt ?? "", on: s.on !== false, label: s.label ?? "", loras: cleanLoras(s.loras) })),
+        main_vae: d.main_vae ?? null,
+        main_clip_skip: cleanSkip(d.main_clip_skip),
+        slots: (d.slots ?? []).map((s) => ({ ckpt: s.ckpt ?? "", on: s.on !== false, label: s.label ?? "", loras: cleanLoras(s.loras), vae: s.vae ?? null, clip_skip: cleanSkip(s.clip_skip) })),
     };
 }
 
 function sync(node) {
     const w = node.widgets?.find((w) => w.name === STATE);
-    if (w) w.value = JSON.stringify({ main_label: node.__a.main_label, main_loras: node.__a.main_loras, slots: node.__a.slots });
+    const A = node.__a;
+    if (w) w.value = JSON.stringify({ main_label: A.main_label, main_loras: A.main_loras, main_vae: A.main_vae, main_clip_skip: A.main_clip_skip, slots: A.slots });
 }
 
 function newLora() {
     return { on: true, force: false, lora: "", strength: 1.0 };
 }
 
-function cardHeight(loras) {
-    return HEAD_H + CK_H + loras.length * ROW_H + PADB;
+// main's data lives spread on __a; a slot's lives on the slot object. this is the one accessor
+// that papers over that split, so draw/menu code never has to branch on kind.
+function cardProps(node, card) {
+    const A = node.__a;
+    if (card.kind === "main") return { loras: A.main_loras, vae: A.main_vae, skip: A.main_clip_skip };
+    return { loras: card.slot.loras, vae: card.slot.vae, skip: card.slot.clip_skip };
+}
+function setVae(node, card, v) {
+    if (card.kind === "main") node.__a.main_vae = v; else card.slot.vae = v;
+    commit(node);
+}
+function setSkip(node, card, v) {
+    if (card.kind === "main") node.__a.main_clip_skip = v; else card.slot.clip_skip = v;
+    commit(node);
+}
+function nExtras(vae, skip) {
+    return (vae != null ? 1 : 0) + (skip != null ? 1 : 0);
+}
+
+function cardHeight(loras, extras) {
+    return HEAD_H + CK_H + extras * ROW_H + loras.length * ROW_H + PADB;
 }
 function bodyHeight(node) {
     const A = node.__a;
     if (!A) return ROW_H; // body widget only mounts after __a is set; this is just belt-and-suspenders
-    let h = TOP + cardHeight(A.main_loras) + GAP;
-    for (const s of A.slots) h += cardHeight(s.loras) + GAP;
+    let h = TOP + cardHeight(A.main_loras, nExtras(A.main_vae, A.main_clip_skip)) + GAP;
+    for (const s of A.slots) h += cardHeight(s.loras, s.on ? nExtras(s.vae, s.clip_skip) : 0) + GAP;
     return h + ADD_H;
 }
 
@@ -348,6 +388,22 @@ function drawUp(ctx, cx, cy, col) {
     ctx.beginPath(); ctx.moveTo(cx, cy + 4); ctx.lineTo(cx, cy - 4); ctx.moveTo(cx - 3, cy - 1); ctx.lineTo(cx, cy - 4); ctx.lineTo(cx + 3, cy - 1); ctx.stroke();
 }
 
+// the ‹ value › pill. box stays solid; arrows+value dim to `alpha` (a lora row fades when off).
+// zones: dec (left arrow) / type (middle, click-to-enter) / inc (right arrow).
+function drawStepper(ctx, node, sx, mid, ry, text, alpha, hx, hy, zones, onDec, onType, onInc) {
+    const stepW = 56;
+    ctx.beginPath(); ctx.roundRect(sx, mid - 9, stepW, 18, 9);
+    ctx.fillStyle = C.inset; ctx.fill(); ctx.lineWidth = 1; ctx.strokeStyle = C.stroke; ctx.stroke();
+    ctx.globalAlpha = alpha; ctx.textAlign = "center";
+    drawStep(ctx, node, sx + 9, mid, "‹", inZone(hx, hy, sx, ry + 2, sx + 18, ry + ROW_H - 2));
+    ctx.fillStyle = C.gold; ctx.font = "600 11px 'Bricolage Grotesque', Arial"; ctx.fillText(text, sx + stepW / 2, mid);
+    drawStep(ctx, node, sx + stepW - 9, mid, "›", inZone(hx, hy, sx + stepW - 18, ry + 2, sx + stepW, ry + ROW_H - 2));
+    ctx.globalAlpha = 1;
+    zones.push({ x0: sx, y0: ry + 2, x1: sx + 18, y1: ry + ROW_H - 2, fn: onDec });
+    zones.push({ x0: sx + 18, y0: ry + 2, x1: sx + stepW - 18, y1: ry + ROW_H - 2, fn: onType });
+    zones.push({ x0: sx + stepW - 18, y0: ry + 2, x1: sx + stepW, y1: ry + ROW_H - 2, fn: onInc });
+}
+
 function drawLoraRow(ctx, node, card, inh, loras, l, li, cl, cr, ry, zones, hx, hy) {
     const mid = ry + ROW_H / 2;
     const active = inh ? l.force : l.on;
@@ -372,17 +428,11 @@ function drawLoraRow(ctx, node, card, inh, loras, l, li, cl, cr, ry, zones, hx, 
     zones.push({ x0: rx - 15, y0: ry + 2, x1: rx, y1: ry + ROW_H - 2, fn: () => { loras.splice(li, 1); commit(node); } });
     rx -= 20;
 
-    const stepW = 56, sx = rx - stepW;
-    ctx.beginPath(); ctx.roundRect(sx, mid - 9, stepW, 18, 9);
-    ctx.fillStyle = C.inset; ctx.fill(); ctx.lineWidth = 1; ctx.strokeStyle = C.stroke; ctx.stroke();
-    ctx.globalAlpha = active ? 1 : 0.5; ctx.textAlign = "center";
-    drawStep(ctx, node, sx + 9, mid, "‹", inZone(hx, hy, sx, ry + 2, sx + 18, ry + ROW_H - 2));
-    ctx.fillStyle = C.gold; ctx.font = "600 11px 'Bricolage Grotesque', Arial"; ctx.fillText((l.strength ?? 1).toFixed(2), sx + stepW / 2, mid);
-    drawStep(ctx, node, sx + stepW - 9, mid, "›", inZone(hx, hy, sx + stepW - 18, ry + 2, sx + stepW, ry + ROW_H - 2));
-    ctx.globalAlpha = 1;
-    zones.push({ x0: sx, y0: ry + 2, x1: sx + 18, y1: ry + ROW_H - 2, fn: () => { l.strength = Math.round(((l.strength ?? 1) - 0.05) * 100) / 100; commit(node); } });
-    zones.push({ x0: sx + 18, y0: ry + 2, x1: sx + stepW - 18, y1: ry + ROW_H - 2, fn: (e) => app.canvas.prompt("Strength", l.strength ?? 1, (v) => { l.strength = Number(v) || 0; commit(node); }, e) });
-    zones.push({ x0: sx + stepW - 18, y0: ry + 2, x1: sx + stepW, y1: ry + ROW_H - 2, fn: () => { l.strength = Math.round(((l.strength ?? 1) + 0.05) * 100) / 100; commit(node); } });
+    const sx = rx - 56;
+    drawStepper(ctx, node, sx, mid, ry, (l.strength ?? 1).toFixed(2), active ? 1 : 0.5, hx, hy, zones,
+        () => { l.strength = Math.round(((l.strength ?? 1) - 0.05) * 100) / 100; commit(node); },
+        (e) => app.canvas.prompt("Strength", l.strength ?? 1, (v) => { l.strength = Number(v) || 0; commit(node); }, e),
+        () => { l.strength = Math.round(((l.strength ?? 1) + 0.05) * 100) / 100; commit(node); });
     rx = sx - 7;
 
     if (l.lora) {
@@ -399,13 +449,56 @@ function drawLoraRow(ctx, node, card, inh, loras, l, li, cl, cr, ry, zones, hx, 
     zones.push({ x0: x, y0: ry + 2, x1: rx - 4, y1: ry + ROW_H - 2, fn: (e) => chooseLora(e, (v) => { if (typeof v === "string") { l.lora = v; commit(node); } }) });
 }
 
+function drawExtraHover(ctx, cl, cr, ry, hx, hy) {
+    if (hy >= ry && hy < ry + ROW_H && hx >= cl && hx <= cr) {
+        ctx.beginPath(); ctx.roundRect(cl - 3, ry + 1, cr - cl + 6, ROW_H - 2, 7);
+        ctx.fillStyle = "rgba(255,255,255,0.05)"; ctx.fill();
+    }
+}
+function drawExtraRemove(ctx, node, cr, ry, mid, hx, hy, zones, onRemove) {
+    const hover = hy >= ry && hy < ry + ROW_H;
+    drawIco(ctx, node, cr - 7, mid, { a: hover ? 1 : 0.3, hot: inZone(hx, hy, cr - 15, ry + 2, cr, ry + ROW_H - 2), kind: "x", danger: true, box: 18 });
+    zones.push({ x0: cr - 15, y0: ry + 2, x1: cr, y1: ry + ROW_H - 2, fn: onRemove });
+}
+function drawVaeRow(ctx, node, card, vae, cl, cr, ry, zones, hx, hy) {
+    const mid = ry + ROW_H / 2;
+    drawExtraHover(ctx, cl, cr, ry, hx, hy);
+    drawExtraRemove(ctx, node, cr, ry, mid, hx, hy, zones, () => setVae(node, card, null));
+    let rx = cr - 18;
+    drawChev(ctx, rx - 6, mid, C.dim); rx -= 14;
+    ctx.textBaseline = "middle"; ctx.textAlign = "left";
+    ctx.font = "12px 'Hanken Grotesk', Arial"; ctx.fillStyle = C.dim;
+    ctx.fillText("vae", cl, mid);
+    const vx = cl + 30;
+    ctx.fillStyle = vae ? C.txt : C.dim;
+    ctx.font = (vae ? "12px" : "italic 12px") + " 'Hanken Grotesk', Arial";
+    ctx.fillText(fit(ctx, vae ? baseName(vae) : "Baked VAE", rx - vx - 4), vx, mid);
+    zones.push({ x0: cl, y0: ry + 2, x1: rx, y1: ry + ROW_H - 2, fn: (e) => chooseVae(node, card, e) });
+}
+function drawClipRow(ctx, node, card, skip, cl, cr, ry, zones, hx, hy) {
+    const mid = ry + ROW_H / 2;
+    drawExtraHover(ctx, cl, cr, ry, hx, hy);
+    drawExtraRemove(ctx, node, cr, ry, mid, hx, hy, zones, () => setSkip(node, card, null));
+    const sx = cr - 18 - 56;
+    const clamp = (n) => Math.max(-24, Math.min(-1, n));
+    drawStepper(ctx, node, sx, mid, ry, String(skip), 1, hx, hy, zones,
+        () => setSkip(node, card, clamp(skip - 1)),
+        (e) => app.canvas.prompt("Clip skip", skip, (v) => setSkip(node, card, clamp(parseInt(v, 10) || -2)), e),
+        () => setSkip(node, card, clamp(skip + 1)));
+    ctx.textBaseline = "middle"; ctx.textAlign = "left";
+    ctx.font = "12px 'Hanken Grotesk', Arial"; ctx.fillStyle = C.dim;
+    ctx.fillText("clip skip", cl, mid);
+}
+
 function drawCard(ctx, node, card, width, cy, zones, hx, hy, floating) {
     const A = node.__a;
     const isMain = card.kind === "main";
     const slot = card.slot;
     const loras = isMain ? A.main_loras : slot.loras;
     const inh = !isMain && !slot.on;
-    const h = cardHeight(loras);
+    const vae = isMain ? A.main_vae : slot.vae;
+    const skip = isMain ? A.main_clip_skip : slot.clip_skip;
+    const h = cardHeight(loras, inh ? 0 : nExtras(vae, skip));
     const x0 = M, x1 = width - M;
     const hover = hy >= cy && hy < cy + h && hx >= x0 && hx <= x1;
 
@@ -453,7 +546,7 @@ function drawCard(ctx, node, card, width, cy, zones, hx, hy, floating) {
         tx -= 22;
     }
     drawIco(ctx, node, tx - 7, headMid, { a: hover ? 1 : 0.45, hot: inZone(hx, hy, tx - 16, cy + 2, tx, cy + HEAD_H - 2), kind: "plus" });
-    zones.push({ x0: tx - 16, y0: cy + 2, x1: tx, y1: cy + HEAD_H - 2, fn: () => { loras.push(newLora()); commit(node); } });
+    zones.push({ x0: tx - 16, y0: cy + 2, x1: tx, y1: cy + HEAD_H - 2, fn: (e) => cardAddMenu(node, card, e) });
 
     const ckY = cy + HEAD_H, ckMid = ckY + CK_H / 2;
     ctx.beginPath(); ctx.roundRect(cl, ckY + 2, cr - cl, CK_H - 6, 8);
@@ -476,6 +569,10 @@ function drawCard(ctx, node, card, width, cy, zones, hx, hy, floating) {
     }
 
     let ly = ckY + CK_H;
+    if (!inh) {
+        if (vae != null) { drawVaeRow(ctx, node, card, vae, cl, cr, ly, zones, hx, hy); ly += ROW_H; }
+        if (skip != null) { drawClipRow(ctx, node, card, skip, cl, cr, ly, zones, hx, hy); ly += ROW_H; }
+    }
     loras.forEach((l, li) => { drawLoraRow(ctx, node, card, inh, loras, l, li, cl, cr, ly, zones, hx, hy); ly += ROW_H; });
     ctx.restore();
     return cy + h;
@@ -571,6 +668,13 @@ function chooseLora(event, cb) {
     const scale = Math.max(1, app.canvas?.ds?.scale ?? 1);
     loraList().then((list) => new LiteGraph.ContextMenu(list, { event, scale, className: "dark", title: "choose a lora", callback: cb }));
 }
+function chooseVae(node, card, event) {
+    const scale = Math.max(1, app.canvas?.ds?.scale ?? 1);
+    vaeList().then((list) => new LiteGraph.ContextMenu(["Baked VAE", ...list], {
+        event, scale, className: "dark", title: "choose a vae",
+        callback: (v) => { if (typeof v === "string") setVae(node, card, v === "Baked VAE" ? "" : v); },
+    }));
+}
 function chooseCkpt(node, card, event) {
     const scale = Math.max(1, app.canvas?.ds?.scale ?? 1);
     new LiteGraph.ContextMenu(ckptList(node), {
@@ -594,13 +698,21 @@ function renameCard(node, card, event) {
 }
 function addMenu(node, event) {
     const items = [
-        { content: "Checkpoint", callback: () => { node.__a.slots.push({ ckpt: ckptList(node)[0] || "", on: true, label: "", loras: [] }); commit(node); } },
+        { content: "Checkpoint", callback: () => { node.__a.slots.push({ ckpt: ckptList(node)[0] || "", on: true, label: "", loras: [], vae: null, clip_skip: null }); commit(node); } },
         { content: "Lora", has_submenu: true, callback: (v, opts, e, parent) => loraSubmenu(node, e, parent) },
-        null,
-        { content: "VAE override", disabled: true },
-        { content: "Clip skip", disabled: true },
     ];
     new LiteGraph.ContextMenu(items, { event, className: "dark", title: "add to hub" });
+}
+function cardAddMenu(node, card, event) {
+    const p = cardProps(node, card);
+    const inh = card.kind === "slot" && !card.slot.on;
+    const items = [
+        { content: "Lora", callback: () => { p.loras.push(newLora()); commit(node); } },
+        { content: "VAE override", disabled: inh || p.vae != null, callback: () => setVae(node, card, "") },
+        { content: "Clip skip", disabled: inh || p.skip != null, callback: () => setSkip(node, card, -2) },
+    ];
+    const title = card.kind === "main" ? (node.__a.main_label || "main") : (card.slot.label || "pass " + (card.i + 1));
+    new LiteGraph.ContextMenu(items, { event, className: "dark", title: "add to " + title });
 }
 function loraSubmenu(node, event, parent) {
     const items = [{ content: node.__a.main_label || "main", callback: () => { node.__a.main_loras.push(newLora()); commit(node); } }];
@@ -621,6 +733,7 @@ function mount(node) {
     hide(node.widgets?.find((w) => w.name === STATE));
     hide(node.widgets?.find((w) => w.name === MAINCKPT));
     loraList();
+    vaeList();
     node.__a = parseState(node.widgets?.find((w) => w.name === STATE)?.value);
     if (!bodyOf(node)) node.widgets.push(bodyWidget(node));
     node.onMouseMove = function (e, pos) { this.__hover = pos; this.setDirtyCanvas(true); };
