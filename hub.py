@@ -1,4 +1,5 @@
 import json
+import re
 
 import torch
 import folder_paths
@@ -19,8 +20,8 @@ class AtelierHub:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "ROSTER", "LATENT")
-    RETURN_NAMES = ("model", "clip", "vae", "roster", "latent")
+    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "ROSTER", "LATENT", "CONDITIONING", "CONDITIONING")
+    RETURN_NAMES = ("model", "clip", "vae", "roster", "latent", "positive", "negative")
     FUNCTION = "load"
     CATEGORY = "atelier"
 
@@ -32,14 +33,19 @@ class AtelierHub:
         model, clip = apply_loras(model, clip, [l for l in main["loras"] if l["on"]])
         clip, vae = apply_overrides(clip, vae, main)
         roster = [main] + state["slots"]
+        glb = state["globals"]
+        lat = next((g for g in glb if g["kind"] == "latent"), None)
+        pr = next((g for g in glb if g["kind"] == "prompt"), None)
+        pos = _encode(clip, pr["positive"] if pr else "")
+        neg = _encode(clip, pr["negative"] if pr else "")
         print(f"[atelier] hub roster: {[e['ckpt'] for e in roster]}")
-        return (model, clip, vae, roster, _make_latent(state["latent"]))
+        return (model, clip, vae, roster, _make_latent(lat), pos, neg)
 
 
 def _parse_state(raw):
     raw = (raw or "").strip()
     if not raw:
-        return {"main_loras": [], "main_vae": None, "main_clip_skip": None, "slots": [], "latent": _clean_latent(None)}
+        return {"main_loras": [], "main_vae": None, "main_clip_skip": None, "slots": [], "globals": []}
     # this one field is the source of truth - behavior never gets inferred from widget
     # presence. that's the anti-ghost contract.
     data = json.loads(raw)
@@ -62,8 +68,46 @@ def _parse_state(raw):
         "main_vae": data.get("main_vae") or None,
         "main_clip_skip": _clean_skip(data.get("main_clip_skip")),
         "slots": slots,
-        "latent": _clean_latent(data.get("latent")),
+        "globals": _clean_globals(data),
     }
+
+
+def _encode(clip, text):
+    chunks = [c for c in (s.strip() for s in re.split(r"\s*\bBREAK\b\s*", text or "")) if c]
+    if not chunks:
+        return clip.encode_from_tokens_scheduled(clip.tokenize(""))
+    out = clip.encode_from_tokens_scheduled(clip.tokenize(chunks[0]))
+    for c in chunks[1:]:
+        out = _concat(out, clip.encode_from_tokens_scheduled(clip.tokenize(c)))
+    return out
+
+
+def _concat(cond_to, cond_from):
+    # BREAK glues the next chunk onto every existing cond along the token axis - this is comfy's own
+    # ConditioningConcat, inlined so a BREAK in the prompt doesn't need a node wired downstream
+    src = cond_from[0][0]
+    return [[torch.cat((t[0], src), 1), t[1].copy()] for t in cond_to]
+
+
+def _clean_globals(data):
+    raw = data.get("globals")
+    if raw is None:
+        # legacy shape carried latent as a permanent footer + a prompt with its own on-flag; fold
+        # them into the ordered list so old test workflows don't lose their canvas or prompt
+        if "latent" not in data and "prompt" not in data:
+            return []
+        out = [{"kind": "latent", **_clean_latent(data.get("latent"))}]
+        p = data.get("prompt") or {}
+        if p.get("on"):
+            out.append({"kind": "prompt", "positive": str(p.get("positive") or ""), "negative": str(p.get("negative") or "")})
+        return out
+    out = []
+    for g in raw:
+        if g.get("kind") == "latent":
+            out.append({"kind": "latent", **_clean_latent(g)})
+        elif g.get("kind") == "prompt":
+            out.append({"kind": "prompt", "positive": str(g.get("positive") or ""), "negative": str(g.get("negative") or "")})
+    return out
 
 
 def _clean_latent(raw):
@@ -88,6 +132,7 @@ def _batch(v):
 
 
 def _make_latent(cfg):
+    cfg = cfg or _clean_latent(None)
     # 4-channel latent - right for sd1.5/sdxl. flux & sd3 want 16; revisit if this node ever loads one
     t = torch.zeros([cfg["batch"], 4, cfg["height"] // 8, cfg["width"] // 8], device=comfy.model_management.intermediate_device())
     return {"samples": t}

@@ -1,0 +1,11 @@
+[project]
+name = "comfy-atelier"
+version = "0.4.0"
+description = "koma's comfy atelier - a ComfyUI node pack with progressive-disclosure, glassmorphism nodes"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Koma (Chroma)", email = "chroma@kurobox.me" }]
+
+[project.urls]
+Repository = "https://codex.kurobox.me/chroma/comfy-atelier"

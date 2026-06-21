@@ -15,9 +15,11 @@ const C = {
 const GLASS = { fill: "#14121e", alpha: 0.82 };
 
 // layout, px, node-local
-const M = 9, GAP = 9, HEAD_H = 26, CK_H = 24, ROW_H = 22, PADB = 8, ADD_H = 30, TOP = 4;
-// the canvas footer - permanent, not a ＋ Add section (mother always wants a latent)
-const LAT_DIM_H = 34, LAT_CTL_H = 28, LAT_H = HEAD_H + LAT_DIM_H + LAT_CTL_H + PADB;
+const M = 9, GAP = 9, HEAD_H = 26, CK_H = 24, ROW_H = 22, PADB = 8, ADD_H = 30, TOP = 4, DIV_H = 14;
+// the latent card body (the two dim boxes + the controls strip)
+const LAT_DIM_H = 34, LAT_CTL_H = 28;
+// prompt card: two textareas, heights live in state so a dragged size rehydrates
+const TA_DEFAULT = 72, TA_GAP = 7, TA_MIN = 36;
 // the blessed sdxl dimensions, portrait → square → landscape (mother's list)
 const SDXL_DIMS = [[640, 1536], [768, 1344], [832, 1216], [896, 1152], [1024, 1024], [1152, 896], [1216, 832], [1344, 768], [1536, 640]];
 const MAXDIM = 8192;
@@ -84,40 +86,51 @@ function cleanLoras(arr) {
 function cleanSkip(v) {
     return typeof v === "number" ? v : null;
 }
-function cleanLatent(l) {
-    l = l || {};
-    return {
-        width: typeof l.width === "number" ? l.width : 1024,
-        height: typeof l.height === "number" ? l.height : 1024,
-        batch: typeof l.batch === "number" ? l.batch : 1,
-    };
+function dimOf(v) { return typeof v === "number" ? v : 1024; }
+function taH(v) { return typeof v === "number" && v >= TA_MIN ? v : TA_DEFAULT; }
+
+function cleanGlobals(arr) {
+    const out = [];
+    for (const g of arr ?? []) {
+        if (g.kind === "latent") out.push({ kind: "latent", width: dimOf(g.width), height: dimOf(g.height), batch: typeof g.batch === "number" ? g.batch : 1 });
+        else if (g.kind === "prompt") out.push({ kind: "prompt", positive: g.positive ?? "", negative: g.negative ?? "", ph: taH(g.ph), nh: taH(g.nh) });
+    }
+    return out;
 }
 
 function parseState(raw) {
-    const empty = { main_label: "main", main_loras: [], main_vae: null, main_clip_skip: null, slots: [], latent: cleanLatent(null) };
+    const empty = { main_label: "main", main_loras: [], main_vae: null, main_clip_skip: null, slots: [], globals: [] };
     if (!raw) return empty;
     let d;
     try { d = JSON.parse(raw); } catch { return empty; }
     if (Array.isArray(d)) d = { main_loras: [], slots: d }; // phase 2 shipped a bare slot array
+    let globals = d.globals;
+    if (globals === undefined && (d.latent || d.prompt)) {
+        // legacy: latent was a permanent footer, prompt carried its own on-flag
+        globals = [{ kind: "latent", ...(d.latent || {}) }];
+        if (d.prompt?.on) globals.push({ kind: "prompt", positive: d.prompt.positive, negative: d.prompt.negative });
+    }
     return {
         main_label: d.main_label || "main",
         main_loras: cleanLoras(d.main_loras),
         main_vae: d.main_vae ?? null,
         main_clip_skip: cleanSkip(d.main_clip_skip),
         slots: (d.slots ?? []).map((s) => ({ ckpt: s.ckpt ?? "", on: s.on !== false, label: s.label ?? "", loras: cleanLoras(s.loras), vae: s.vae ?? null, clip_skip: cleanSkip(s.clip_skip) })),
-        latent: cleanLatent(d.latent),
+        globals: cleanGlobals(globals),
     };
 }
 
 function sync(node) {
     const w = node.widgets?.find((w) => w.name === STATE);
     const A = node.__a;
-    if (w) w.value = JSON.stringify({ main_label: A.main_label, main_loras: A.main_loras, main_vae: A.main_vae, main_clip_skip: A.main_clip_skip, slots: A.slots, latent: A.latent });
+    if (w) w.value = JSON.stringify({ main_label: A.main_label, main_loras: A.main_loras, main_vae: A.main_vae, main_clip_skip: A.main_clip_skip, slots: A.slots, globals: A.globals });
 }
 
 function newLora() {
     return { on: true, force: false, lora: "", strength: 1.0 };
 }
+function promptOf(node) { return node.__a.globals.find((g) => g.kind === "prompt"); }
+function hasGlobal(node, kind) { return node.__a.globals.some((g) => g.kind === kind); }
 
 // main's data lives spread on __a; a slot's lives on the slot object. this is the one accessor
 // that papers over that split, so draw/menu code never has to branch on kind.
@@ -141,12 +154,20 @@ function nExtras(vae, skip) {
 function cardHeight(loras, extras) {
     return HEAD_H + CK_H + extras * ROW_H + loras.length * ROW_H + PADB;
 }
+function latentHeight() { return HEAD_H + LAT_DIM_H + LAT_CTL_H + PADB; }
+function promptHeight(g) { return HEAD_H + taH(g.ph) + TA_GAP + taH(g.nh) + PADB; }
+function globalHeight(g) { return g.kind === "latent" ? latentHeight() : promptHeight(g); }
+
 function bodyHeight(node) {
     const A = node.__a;
     if (!A) return ROW_H; // body widget only mounts after __a is set; this is just belt-and-suspenders
     let h = TOP + cardHeight(A.main_loras, nExtras(A.main_vae, A.main_clip_skip)) + GAP;
     for (const s of A.slots) h += cardHeight(s.loras, s.on ? nExtras(s.vae, s.clip_skip) : 0) + GAP;
-    return h + ADD_H + GAP + LAT_H;
+    if (A.globals.length) {
+        h += DIV_H;
+        for (const g of A.globals) h += globalHeight(g) + GAP;
+    }
+    return h + ADD_H;
 }
 
 function resize(node) {
@@ -158,6 +179,7 @@ function resize(node) {
 function commit(node) {
     sync(node);
     resize(node);
+    syncOverlay(node);
     node.setDirtyCanvas(true, true);
 }
 
@@ -370,13 +392,14 @@ function drawDropLine(ctx, width, y) {
     ctx.beginPath(); ctx.roundRect(x0, y - 1.25, x1 - x0, 2.5, 2); ctx.fill();
     ctx.restore();
 }
-// first slot whose midpoint sits below the pointer wins the drop; else it lands last
+// only rows in the dragged item's own list contend - checkpoints and globals never cross zones.
+// first one whose midpoint sits below the pointer wins the drop; else it lands last
 function computeDrop(node, d) {
-    const rows = node.__rows || [];
+    const rows = (node.__rows || []).filter((r) => r.list === d.list);
     let before = null, lineY = null;
     for (const r of rows) {
-        if (r.slot === d.slot) continue;
-        if (d.curY < r.top + r.h / 2) { before = r.slot; lineY = r.top - GAP / 2; break; }
+        if (r.item === d.item) continue;
+        if (d.curY < r.top + r.h / 2) { before = r.item; lineY = r.top - GAP / 2; break; }
     }
     if (lineY === null && rows.length) { const last = rows[rows.length - 1]; lineY = last.top + last.h + GAP / 2; }
     d.before = before; d.lineY = lineY;
@@ -415,6 +438,13 @@ function drawFrame(ctx, cx, mid, col) {
     ctx.lineWidth = 1.1;
     ctx.beginPath(); ctx.moveTo(cx - 4, mid + 3); ctx.lineTo(cx - 1, mid - 1); ctx.lineTo(cx + 1.5, mid + 1.5); ctx.lineTo(cx + 4, mid - 2); ctx.stroke();
     ctx.fillStyle = col; ctx.beginPath(); ctx.arc(cx + 2.5, mid - 2.5, 1, 0, Math.PI * 2); ctx.fill();
+}
+function drawQuote(ctx, cx, mid, col) {
+    ctx.fillStyle = col;
+    for (const dx of [-3, 2]) {
+        ctx.beginPath(); ctx.roundRect(cx + dx - 1, mid - 4, 2.4, 4.5, 1); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(cx + dx - 1, mid + 0.5); ctx.lineTo(cx + dx + 1.4, mid + 0.5); ctx.lineTo(cx + dx - 1, mid + 3.5); ctx.closePath(); ctx.fill();
+    }
 }
 function drawGrid(ctx, cx, mid, col) {
     ctx.strokeStyle = col; ctx.lineWidth = 1.1;
@@ -542,6 +572,18 @@ function drawClipRow(ctx, node, card, skip, cl, cr, ry, zones, hx, hy) {
     ctx.fillText("clip skip", cl, mid);
 }
 
+function cardShell(ctx, node, opts) {
+    const { x0, x1, cy, h, hover, floating, accent } = opts;
+    ctx.beginPath(); ctx.roundRect(x0, cy, x1 - x0, h, 12);
+    if (floating) { ctx.save(); ctx.shadowColor = "rgba(255,107,92,0.45)"; ctx.shadowBlur = 30; ctx.shadowOffsetY = 12; ctx.fillStyle = "rgba(26,22,38,0.97)"; ctx.fill(); ctx.restore(); }
+    ctx.fillStyle = floating ? "rgba(255,255,255,0.06)" : (hover ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.035)");
+    ctx.fill();
+    ctx.lineWidth = floating ? 1.5 : 1;
+    ctx.strokeStyle = floating ? "rgba(255,107,92,0.55)" : (hover ? "rgba(255,255,255,0.16)" : C.stroke);
+    ctx.stroke();
+    return { cl: x0 + 12, cr: x1 - 11, headMid: cy + HEAD_H / 2 };
+}
+
 function drawCard(ctx, node, card, width, cy, zones, hx, hy, floating) {
     const A = node.__a;
     const isMain = card.kind === "main";
@@ -576,7 +618,7 @@ function drawCard(ctx, node, card, width, cy, zones, hx, hy, floating) {
     let hxp = cl;
     if (!isMain) {
         drawGrip(ctx, hxp, headMid, hover ? C.txt : C.dim);
-        zones.push({ x0: hxp - 4, y0: cy + 2, x1: hxp + 12, y1: cy + HEAD_H - 2, drag: slot });
+        zones.push({ x0: hxp - 4, y0: cy + 2, x1: hxp + 12, y1: cy + HEAD_H - 2, drag: slot, list: A.slots });
         hxp += 14;
         drawSwitch(ctx, node, slot, hxp, headMid, slot.on);
         zones.push({ x0: hxp, y0: cy + 2, x1: hxp + 24, y1: cy + HEAD_H - 2, fn: () => { slot.on = !slot.on; commit(node); } });
@@ -630,6 +672,98 @@ function drawCard(ctx, node, card, width, cy, zones, hx, hy, floating) {
     return cy + h;
 }
 
+function drawLatentCard(ctx, node, g, width, cy, zones, hx, hy, floating) {
+    const A = node.__a;
+    const h = latentHeight();
+    const x0 = M, x1 = width - M;
+    const hover = hy >= cy && hy < cy + h && hx >= x0 && hx <= x1;
+    ctx.save(); ctx.translate(0, hover && !floating ? -1 : 0);
+    const { cl, cr, headMid } = cardShell(ctx, node, { x0, x1, cy, h, hover, floating });
+
+    let hxp = cl;
+    drawGrip(ctx, hxp, headMid, hover ? C.txt : C.dim);
+    zones.push({ x0: hxp - 4, y0: cy + 2, x1: hxp + 12, y1: cy + HEAD_H - 2, drag: g, list: A.globals });
+    hxp += 16;
+    drawFrame(ctx, hxp + 3, headMid, C.accent); hxp += 14;
+    ctx.textBaseline = "middle"; ctx.textAlign = "left"; ctx.font = "600 13px 'Bricolage Grotesque', Arial"; ctx.fillStyle = C.txt;
+    ctx.fillText("canvas", hxp, headMid);
+    drawAspect(ctx, cr - 22, headMid, g.width, g.height);
+    const xHot = inZone(hx, hy, cr - 16, cy + 2, cr, cy + HEAD_H - 2);
+    drawIco(ctx, node, cr - 7, headMid, { a: hover ? 1 : 0.4, hot: xHot, kind: "x", danger: true, rot: anim(node, g, "spin", xHot ? 1 : 0, 220) });
+    zones.push({ x0: cr - 16, y0: cy + 2, x1: cr, y1: cy + HEAD_H - 2, fn: () => removeGlobal(node, g) });
+
+    const dimY = cy + HEAD_H, dimMid = dimY + LAT_DIM_H / 2;
+    const boxW = 66, boxH = 24, gap = 26, totalW = boxW * 2 + gap;
+    const wbx = (x0 + x1) / 2 - totalW / 2, hbx = wbx + boxW + gap;
+    drawNumBox(ctx, wbx, dimMid, boxW, boxH, g.width, inZone(hx, hy, wbx, dimMid - 12, wbx + boxW, dimMid + 12));
+    zones.push({ x0: wbx, y0: dimMid - 12, x1: wbx + boxW, y1: dimMid + 12, fn: (e) => app.canvas.prompt("Width", g.width, (v) => { g.width = snapDim(v); commit(node); }, e) });
+    ctx.fillStyle = C.dim; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.font = "13px 'Hanken Grotesk', Arial";
+    ctx.fillText("×", wbx + boxW + gap / 2, dimMid);
+    drawNumBox(ctx, hbx, dimMid, boxW, boxH, g.height, inZone(hx, hy, hbx, dimMid - 12, hbx + boxW, dimMid + 12));
+    zones.push({ x0: hbx, y0: dimMid - 12, x1: hbx + boxW, y1: dimMid + 12, fn: (e) => app.canvas.prompt("Height", g.height, (v) => { g.height = snapDim(v); commit(node); }, e) });
+
+    const ctlY = dimY + LAT_DIM_H, ctlMid = ctlY + LAT_CTL_H / 2;
+    zones.push({ ...drawPresetPill(ctx, node, cl, ctlY, hx, hy), fn: (e) => chooseDim(node, g, e) });
+    const sx = cr - 56;
+    drawStepper(ctx, node, sx, ctlMid, ctlMid - ROW_H / 2, String(g.batch), 1, hx, hy, zones,
+        () => { g.batch = Math.max(1, g.batch - 1); commit(node); },
+        (e) => app.canvas.prompt("Batch", g.batch, (v) => { g.batch = Math.max(1, parseInt(v, 10) || 1); commit(node); }, e),
+        () => { g.batch += 1; commit(node); });
+    ctx.fillStyle = C.dim; ctx.textAlign = "right"; ctx.textBaseline = "middle"; ctx.font = "12px 'Hanken Grotesk', Arial";
+    ctx.fillText("batch", sx - 8, ctlMid);
+    ctx.restore();
+    return cy + h;
+}
+
+function drawPromptCard(ctx, node, g, width, cy, zones, hx, hy, floating) {
+    const A = node.__a;
+    const ph = taH(g.ph), nh = taH(g.nh);
+    const h = HEAD_H + ph + TA_GAP + nh + PADB;
+    const x0 = M, x1 = width - M;
+    const hover = hy >= cy && hy < cy + h && hx >= x0 && hx <= x1;
+    ctx.save(); ctx.translate(0, hover && !floating ? -1 : 0);
+    const { cl, cr, headMid } = cardShell(ctx, node, { x0, x1, cy, h, hover, floating });
+
+    let hxp = cl;
+    drawGrip(ctx, hxp, headMid, hover ? C.txt : C.dim);
+    zones.push({ x0: hxp - 4, y0: cy + 2, x1: hxp + 12, y1: cy + HEAD_H - 2, drag: g, list: A.globals });
+    hxp += 16;
+    drawQuote(ctx, hxp + 3, headMid, C.accent); hxp += 14;
+    ctx.textBaseline = "middle"; ctx.textAlign = "left"; ctx.font = "600 13px 'Bricolage Grotesque', Arial"; ctx.fillStyle = C.txt;
+    ctx.fillText("prompt", hxp, headMid);
+    const xHot = inZone(hx, hy, cr - 16, cy + 2, cr, cy + HEAD_H - 2);
+    drawIco(ctx, node, cr - 7, headMid, { a: hover ? 1 : 0.4, hot: xHot, kind: "x", danger: true, rot: anim(node, g, "spin", xHot ? 1 : 0, 220) });
+    zones.push({ x0: cr - 16, y0: cy + 2, x1: cr, y1: cy + HEAD_H - 2, fn: () => removeGlobal(node, g) });
+
+    // the two textarea wells. live editing rides a DOM overlay placed over these (see placeOverlay).
+    // while floating (a drag), the overlay is hidden and we paint a text preview so the card isn't empty.
+    const wells = [[cy + HEAD_H, ph, g.positive, "positive prompt…", C.accent], [cy + HEAD_H + ph + TA_GAP, nh, g.negative, "negative prompt…", C.gold]];
+    for (const [wy, wh, text, ph_text, tint] of wells) {
+        ctx.beginPath(); ctx.roundRect(cl, wy, cr - cl, wh, 9);
+        ctx.fillStyle = "rgba(0,0,0,0.26)"; ctx.fill();
+        ctx.lineWidth = 1; ctx.strokeStyle = floating ? "rgba(255,255,255,0.10)" : C.stroke; ctx.stroke();
+        if (floating) {
+            ctx.save(); ctx.beginPath(); ctx.roundRect(cl, wy, cr - cl, wh, 9); ctx.clip();
+            ctx.textAlign = "left"; ctx.textBaseline = "top";
+            ctx.font = (text ? "12px" : "italic 12px") + " 'Hanken Grotesk', Arial";
+            ctx.fillStyle = text ? C.txt : C.dim;
+            const lines = (text || ph_text).split("\n").slice(0, Math.max(1, Math.floor((wh - 10) / 16)));
+            lines.forEach((ln, i) => ctx.fillText(fit(ctx, ln, cr - cl - 16), cl + 8, wy + 7 + i * 16));
+            ctx.restore();
+            ctx.fillStyle = tint; ctx.beginPath(); ctx.roundRect(cl + 1.5, wy + 7, 2, wh - 14, 1); ctx.fill();
+        }
+    }
+    ctx.restore();
+    if (!floating) node.__taPlace = { cl, top: cy + HEAD_H, w: cr - cl };
+    return cy + h;
+}
+
+function drawSection(ctx, node, item, list, i, width, top, zones, hx, hy, floating) {
+    if (list === node.__a.slots) return drawCard(ctx, node, { kind: "slot", slot: item, i }, width, top, zones, hx, hy, floating);
+    if (item.kind === "latent") return drawLatentCard(ctx, node, item, width, top, zones, hx, hy, floating);
+    return drawPromptCard(ctx, node, item, width, top, zones, hx, hy, floating);
+}
+
 function drawAdd(ctx, node, width, cy, zones, hx, hy) {
     const x0 = M, x1 = width - M, h = ADD_H - 6, y = cy + 2;
     const hover = hy >= cy && hy < cy + ADD_H && hx >= x0 && hx <= x1;
@@ -644,6 +778,14 @@ function drawAdd(ctx, node, width, cy, zones, hx, hy) {
         ctx.fillText("＋  Add", cx, y + h / 2);
     });
     zones.push({ x0, y0: cy, x1, y1: cy + ADD_H, fn: (e) => addMenu(node, e) });
+}
+
+function drawDivider(ctx, width, cy) {
+    const y = cy + DIV_H / 2;
+    const x0 = M + 6, x1 = width - M - 6;
+    const g = ctx.createLinearGradient(x0, 0, x1, 0);
+    g.addColorStop(0, "rgba(255,255,255,0)"); g.addColorStop(0.5, "rgba(255,255,255,0.12)"); g.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = g; ctx.fillRect(x0, y, x1 - x0, 1);
 }
 
 function drawPresetPill(ctx, node, x, cy, hx, hy) {
@@ -663,47 +805,11 @@ function drawPresetPill(ctx, node, x, cy, hx, hy) {
     return { x0: x, y0: y, x1: x + w, y1: y + h };
 }
 
-function drawLatent(ctx, node, width, cy, zones, hx, hy) {
-    const L = node.__a.latent;
-    const x0 = M, x1 = width - M;
-    ctx.beginPath(); ctx.roundRect(x0, cy, x1 - x0, LAT_H, 12);
-    ctx.fillStyle = "rgba(255,255,255,0.035)"; ctx.fill();
-    ctx.lineWidth = 1; ctx.strokeStyle = C.stroke; ctx.stroke();
-
-    const cl = x0 + 12, cr = x1 - 11;
-    const headMid = cy + HEAD_H / 2;
-    drawFrame(ctx, cl + 5, headMid, C.accent);
-    ctx.textBaseline = "middle"; ctx.textAlign = "left"; ctx.font = "600 13px 'Bricolage Grotesque', Arial"; ctx.fillStyle = C.txt;
-    ctx.fillText("canvas", cl + 18, headMid);
-    drawAspect(ctx, cr, headMid, L.width, L.height);
-
-    const dimY = cy + HEAD_H, dimMid = dimY + LAT_DIM_H / 2;
-    const boxW = 66, boxH = 24, gap = 26, totalW = boxW * 2 + gap;
-    const wbx = (x0 + x1) / 2 - totalW / 2, hbx = wbx + boxW + gap;
-    drawNumBox(ctx, wbx, dimMid, boxW, boxH, L.width, inZone(hx, hy, wbx, dimMid - 12, wbx + boxW, dimMid + 12));
-    zones.push({ x0: wbx, y0: dimMid - 12, x1: wbx + boxW, y1: dimMid + 12, fn: (e) => app.canvas.prompt("Width", L.width, (v) => { L.width = snapDim(v); commit(node); }, e) });
-    ctx.fillStyle = C.dim; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.font = "13px 'Hanken Grotesk', Arial";
-    ctx.fillText("×", wbx + boxW + gap / 2, dimMid);
-    drawNumBox(ctx, hbx, dimMid, boxW, boxH, L.height, inZone(hx, hy, hbx, dimMid - 12, hbx + boxW, dimMid + 12));
-    zones.push({ x0: hbx, y0: dimMid - 12, x1: hbx + boxW, y1: dimMid + 12, fn: (e) => app.canvas.prompt("Height", L.height, (v) => { L.height = snapDim(v); commit(node); }, e) });
-
-    const ctlY = dimY + LAT_DIM_H, ctlMid = ctlY + LAT_CTL_H / 2;
-    zones.push({ ...drawPresetPill(ctx, node, cl, ctlY, hx, hy), fn: (e) => chooseDim(node, e) });
-    const sx = cr - 56;
-    drawStepper(ctx, node, sx, ctlMid, ctlMid - ROW_H / 2, String(L.batch), 1, hx, hy, zones,
-        () => { L.batch = Math.max(1, L.batch - 1); commit(node); },
-        (e) => app.canvas.prompt("Batch", L.batch, (v) => { L.batch = Math.max(1, parseInt(v, 10) || 1); commit(node); }, e),
-        () => { L.batch += 1; commit(node); });
-    ctx.fillStyle = C.dim; ctx.textAlign = "right"; ctx.textBaseline = "middle"; ctx.font = "12px 'Hanken Grotesk', Arial";
-    ctx.fillText("batch", sx - 8, ctlMid);
-}
-
-function chooseDim(node, event) {
-    const L = node.__a.latent;
+function chooseDim(node, g, event) {
     const scale = Math.max(1, app.canvas?.ds?.scale ?? 1);
     const items = SDXL_DIMS.map(([w, h]) => ({
-        content: (L.width === w && L.height === h ? "● " : "") + w + " × " + h + "   " + ratio(w, h),
-        callback: () => { L.width = w; L.height = h; commit(node); },
+        content: (g.width === w && g.height === h ? "● " : "") + w + " × " + h + "   " + ratio(w, h),
+        callback: () => { g.width = w; g.height = h; commit(node); },
     }));
     new LiteGraph.ContextMenu(items, { event, scale, className: "dark", title: "sdxl dimensions" });
 }
@@ -713,44 +819,55 @@ function drawBody(ctx, node, width, y0, w) {
     const zones = [];
     const d = node.__drag;
     const hov = (node.__hover && !d) ? node.__hover : null, hx = hov ? hov[0] : -1, hy = hov ? hov[1] : -1;
+    node.__taPlace = null;
     ctx.save();
     let cy = y0 + TOP;
     cy = drawCard(ctx, node, { kind: "main" }, width, cy, zones, hx, hy) + GAP;
     const rows = [];
     A.slots.forEach((s, i) => {
-        const top = cy, h = cardHeight(s.loras);
-        if (d && d.slot === s) { drawHole(ctx, width, top, h); cy = top + h; }
+        const top = cy, h = cardHeight(s.loras, s.on ? nExtras(s.vae, s.clip_skip) : 0);
+        if (d && d.item === s) { drawHole(ctx, width, top, h); cy = top + h; }
         else cy = drawCard(ctx, node, { kind: "slot", slot: s, i }, width, top, zones, hx, hy);
-        rows.push({ slot: s, i, top, h: cy - top });
+        rows.push({ item: s, list: A.slots, i, top, h: cy - top });
         cy += GAP;
     });
+    if (A.globals.length) {
+        drawDivider(ctx, width, cy); cy += DIV_H;
+        A.globals.forEach((g, i) => {
+            const top = cy, h = globalHeight(g);
+            if (d && d.item === g) { drawHole(ctx, width, top, h); cy = top + h; }
+            else cy = drawSection(ctx, node, g, A.globals, i, width, top, zones, hx, hy);
+            rows.push({ item: g, list: A.globals, top, h: cy - top });
+            cy += GAP;
+        });
+    }
     node.__rows = rows;
     drawAdd(ctx, node, width, cy, zones, hx, hy);
-    drawLatent(ctx, node, width, cy + ADD_H + GAP, zones, hx, hy);
     if (d) {
         computeDrop(node, d);
         drawDropLine(ctx, width, d.lineY);
-        const home = rows.find((r) => r.slot === d.slot);
+        const home = rows.find((r) => r.item === d.item);
         if (home) {
             ctx.save(); ctx.translate(0, d.curY - d.grabY);
-            drawCard(ctx, node, { kind: "slot", slot: d.slot, i: home.i }, width, home.top, [], -1, -1, true);
+            drawSection(ctx, node, d.item, d.list, home.i ?? 0, width, home.top, [], -1, -1, true);
             ctx.restore();
         }
     }
     ctx.restore();
     w.__zones = zones;
+    placeOverlay(node);
 }
 
 function applyDrop(node, d) {
-    const slots = node.__a.slots;
-    const i = slots.indexOf(d.slot);
+    const arr = d.list;
+    const i = arr.indexOf(d.item);
     if (i < 0) return;
     computeDrop(node, d);
-    slots.splice(i, 1);
-    if (d.before && d.before !== d.slot) {
-        const j = slots.indexOf(d.before);
-        slots.splice(j < 0 ? slots.length : j, 0, d.slot);
-    } else slots.push(d.slot);
+    arr.splice(i, 1);
+    if (d.before && d.before !== d.item) {
+        const j = arr.indexOf(d.before);
+        arr.splice(j < 0 ? arr.length : j, 0, d.item);
+    } else arr.push(d.item);
 }
 
 function bodyMouse(e, pos, node, w) {
@@ -768,7 +885,7 @@ function bodyMouse(e, pos, node, w) {
     for (let i = zs.length - 1; i >= 0; i--) {
         const z = zs[i];
         if (x >= z.x0 && x <= z.x1 && y >= z.y0 && y <= z.y1) {
-            if (z.drag !== undefined) { node.__drag = { slot: z.drag, grabY: y, curY: y, before: null, lineY: null }; keepAnimating(node); return true; }
+            if (z.drag !== undefined) { node.__drag = { item: z.drag, list: z.list, grabY: y, curY: y, before: null, lineY: null }; keepAnimating(node); return true; }
             node.__tap = { x: (z.x0 + z.x1) / 2, y: (z.y0 + z.y1) / 2, t0: performance.now() };
             keepAnimating(node);
             z.fn(e);
@@ -776,6 +893,91 @@ function bodyMouse(e, pos, node, w) {
         }
     }
     return false; // empty space falls through so the node still drags by its body
+}
+
+// --- the prompt overlay. comfy's own DOM widgets can't ride inside a custom-drawn body, so the
+// textareas are placed by hand off the canvas transform. text lives in the globals blob, not the widget.
+const FONTS = "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Hanken+Grotesk:wght@300;400;500;600&display=swap";
+const PR_CSS = `
+.atelier-pr{position:fixed;z-index:60;transform-origin:0 0;pointer-events:none;display:flex;flex-direction:column;gap:${TA_GAP}px}
+.atelier-pr textarea{pointer-events:auto;box-sizing:border-box;width:100%;resize:vertical;overflow:auto;min-height:${TA_MIN}px;
+  font-family:"Hanken Grotesk",sans-serif;font-size:12.5px;line-height:1.45;color:#ece9f5;
+  background:rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.12);border-radius:9px;padding:7px 9px;outline:none;
+  transition:border-color .15s,background .15s}
+.atelier-pr textarea::placeholder{color:#6f6889;font-style:italic}
+.atelier-pr textarea:focus{border-color:rgba(255,107,92,.55);background:rgba(0,0,0,.36)}
+.atelier-pr textarea.neg:focus{border-color:rgba(255,211,107,.5)}
+.atelier-pr textarea::-webkit-scrollbar{width:8px}
+.atelier-pr textarea::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:99px;border:2px solid transparent;background-clip:padding-box}
+`;
+function ensurePromptAssets() {
+    if (document.getElementById("atelier-pr-style")) return;
+    const link = document.createElement("link");
+    link.rel = "stylesheet"; link.href = FONTS;
+    document.head.appendChild(link);
+    const style = document.createElement("style");
+    style.id = "atelier-pr-style"; style.textContent = PR_CSS;
+    document.head.appendChild(style);
+}
+
+function mkArea(node, g, key, cls, placeholder) {
+    const ta = document.createElement("textarea");
+    ta.className = cls; ta.placeholder = placeholder; ta.spellcheck = false;
+    ta.value = g[key];
+    ta.style.height = (cls === "neg" ? taH(g.nh) : taH(g.ph)) + "px";
+    ta.addEventListener("input", () => { g[key] = ta.value; sync(node); });
+    const hk = cls === "neg" ? "nh" : "ph";
+    const ro = new ResizeObserver(() => {
+        const hh = ta.offsetHeight; // layout px == node-local (transform:scale doesn't touch offsetHeight)
+        if (hh >= TA_MIN && Math.abs(taH(g[hk]) - hh) > 1) { g[hk] = hh; commit(node); }
+    });
+    ro.observe(ta);
+    ta.__ro = ro;
+    return ta;
+}
+
+function ensurePromptBox(node) {
+    if (node.__prBox) return;
+    const g = promptOf(node);
+    if (!g) return;
+    ensurePromptAssets();
+    const box = document.createElement("div");
+    box.className = "atelier-pr";
+    box.append(mkArea(node, g, "positive", "pos", "positive prompt…"), mkArea(node, g, "negative", "neg", "negative prompt…"));
+    document.body.appendChild(box);
+    node.__prBox = box;
+}
+function destroyPromptBox(node) {
+    if (!node.__prBox) return;
+    node.__prBox.querySelectorAll("textarea").forEach((ta) => ta.__ro?.disconnect());
+    node.__prBox.remove();
+    node.__prBox = null;
+}
+function syncOverlay(node) {
+    if (promptOf(node)) ensurePromptBox(node);
+    else destroyPromptBox(node);
+}
+
+function placeOverlay(node) {
+    const box = node.__prBox;
+    if (!box) return;
+    const p = node.__taPlace;
+    const ds = app.canvas?.ds;
+    if (!p || !ds || node.flags?.collapsed) { box.style.display = "none"; return; }
+    const rect = app.canvas.canvas.getBoundingClientRect();
+    const [sx, sy] = ds.convertOffsetToCanvas([node.pos[0] + p.cl, node.pos[1] + p.top]);
+    if (sy < -40 || sy > rect.height + 40) { box.style.display = "none"; return; } // scrolled off the canvas
+    box.style.display = "flex";
+    box.style.left = (rect.left + sx) + "px";
+    box.style.top = (rect.top + sy) + "px";
+    box.style.width = p.w + "px";
+    box.style.transform = `scale(${ds.scale})`;
+}
+
+function removeGlobal(node, g) {
+    const i = node.__a.globals.indexOf(g);
+    if (i >= 0) node.__a.globals.splice(i, 1);
+    commit(node);
 }
 
 // --- choosers (the dark filtered menu is our one interaction grammar) ---
@@ -815,6 +1017,8 @@ function addMenu(node, event) {
     const items = [
         { content: "Checkpoint", callback: () => { node.__a.slots.push({ ckpt: ckptList(node)[0] || "", on: true, label: "", loras: [], vae: null, clip_skip: null }); commit(node); } },
         { content: "Lora", has_submenu: true, callback: (v, opts, e, parent) => loraSubmenu(node, e, parent) },
+        { content: "Canvas", disabled: hasGlobal(node, "latent"), callback: () => { node.__a.globals.push({ kind: "latent", width: 1024, height: 1024, batch: 1 }); commit(node); } },
+        { content: "Prompt", disabled: hasGlobal(node, "prompt"), callback: () => { node.__a.globals.push({ kind: "prompt", positive: "", negative: "", ph: TA_DEFAULT, nh: TA_DEFAULT }); commit(node); } },
     ];
     new LiteGraph.ContextMenu(items, { event, className: "dark", title: "add to hub" });
 }
@@ -851,8 +1055,11 @@ function mount(node) {
     vaeList();
     node.__a = parseState(node.widgets?.find((w) => w.name === STATE)?.value);
     if (!bodyOf(node)) node.widgets.push(bodyWidget(node));
+    syncOverlay(node);
     node.onMouseMove = function (e, pos) { this.__hover = pos; this.setDirtyCanvas(true); };
     node.onMouseLeave = function () { this.__hover = null; this.setDirtyCanvas(true); };
+    const onRemoved = node.onRemoved;
+    node.onRemoved = function () { destroyPromptBox(this); onRemoved?.apply(this, arguments); };
     resize(node);
 }
 
