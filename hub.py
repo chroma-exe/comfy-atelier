@@ -1,6 +1,9 @@
 import json
 
+import torch
 import folder_paths
+import comfy.model_management
+from nodes import MAX_RESOLUTION
 
 from .loader import load_checkpoint, apply_loras, apply_overrides
 
@@ -16,8 +19,8 @@ class AtelierHub:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "ROSTER")
-    RETURN_NAMES = ("model", "clip", "vae", "roster")
+    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "ROSTER", "LATENT")
+    RETURN_NAMES = ("model", "clip", "vae", "roster", "latent")
     FUNCTION = "load"
     CATEGORY = "atelier"
 
@@ -30,13 +33,13 @@ class AtelierHub:
         clip, vae = apply_overrides(clip, vae, main)
         roster = [main] + state["slots"]
         print(f"[atelier] hub roster: {[e['ckpt'] for e in roster]}")
-        return (model, clip, vae, roster)
+        return (model, clip, vae, roster, _make_latent(state["latent"]))
 
 
 def _parse_state(raw):
     raw = (raw or "").strip()
     if not raw:
-        return {"main_loras": [], "main_vae": None, "main_clip_skip": None, "slots": []}
+        return {"main_loras": [], "main_vae": None, "main_clip_skip": None, "slots": [], "latent": _clean_latent(None)}
     # this one field is the source of truth - behavior never gets inferred from widget
     # presence. that's the anti-ghost contract.
     data = json.loads(raw)
@@ -59,7 +62,35 @@ def _parse_state(raw):
         "main_vae": data.get("main_vae") or None,
         "main_clip_skip": _clean_skip(data.get("main_clip_skip")),
         "slots": slots,
+        "latent": _clean_latent(data.get("latent")),
     }
+
+
+def _clean_latent(raw):
+    raw = raw or {}
+    return {"width": _dim(raw.get("width")), "height": _dim(raw.get("height")), "batch": _batch(raw.get("batch"))}
+
+
+def _dim(v):
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return 1024
+    v = max(16, min(MAX_RESOLUTION, v))
+    return v - (v % 8)
+
+
+def _batch(v):
+    try:
+        return max(1, int(v))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _make_latent(cfg):
+    # 4-channel latent - right for sd1.5/sdxl. flux & sd3 want 16; revisit if this node ever loads one
+    t = torch.zeros([cfg["batch"], 4, cfg["height"] // 8, cfg["width"] // 8], device=comfy.model_management.intermediate_device())
+    return {"samples": t}
 
 
 def _clean_skip(raw):

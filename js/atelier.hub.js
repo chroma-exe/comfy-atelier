@@ -16,6 +16,19 @@ const GLASS = { fill: "#14121e", alpha: 0.82 };
 
 // layout, px, node-local
 const M = 9, GAP = 9, HEAD_H = 26, CK_H = 24, ROW_H = 22, PADB = 8, ADD_H = 30, TOP = 4;
+// the canvas footer - permanent, not a ＋ Add section (mother always wants a latent)
+const LAT_DIM_H = 34, LAT_CTL_H = 28, LAT_H = HEAD_H + LAT_DIM_H + LAT_CTL_H + PADB;
+// the blessed sdxl dimensions, portrait → square → landscape (mother's list)
+const SDXL_DIMS = [[640, 1536], [768, 1344], [832, 1216], [896, 1152], [1024, 1024], [1152, 896], [1216, 832], [1344, 768], [1536, 640]];
+const MAXDIM = 8192;
+function gcd(a, b) { return b ? gcd(b, a % b) : a; }
+function ratio(w, h) { const g = gcd(w, h) || 1; return w / g + ":" + h / g; }
+function snapDim(v) {
+    let n = parseInt(v, 10);
+    if (!Number.isFinite(n)) return 1024;
+    n = Math.max(16, Math.min(MAXDIM, n));
+    return n - (n % 8);
+}
 
 let _loras = null;
 async function loraList() {
@@ -71,9 +84,17 @@ function cleanLoras(arr) {
 function cleanSkip(v) {
     return typeof v === "number" ? v : null;
 }
+function cleanLatent(l) {
+    l = l || {};
+    return {
+        width: typeof l.width === "number" ? l.width : 1024,
+        height: typeof l.height === "number" ? l.height : 1024,
+        batch: typeof l.batch === "number" ? l.batch : 1,
+    };
+}
 
 function parseState(raw) {
-    const empty = { main_label: "main", main_loras: [], main_vae: null, main_clip_skip: null, slots: [] };
+    const empty = { main_label: "main", main_loras: [], main_vae: null, main_clip_skip: null, slots: [], latent: cleanLatent(null) };
     if (!raw) return empty;
     let d;
     try { d = JSON.parse(raw); } catch { return empty; }
@@ -84,13 +105,14 @@ function parseState(raw) {
         main_vae: d.main_vae ?? null,
         main_clip_skip: cleanSkip(d.main_clip_skip),
         slots: (d.slots ?? []).map((s) => ({ ckpt: s.ckpt ?? "", on: s.on !== false, label: s.label ?? "", loras: cleanLoras(s.loras), vae: s.vae ?? null, clip_skip: cleanSkip(s.clip_skip) })),
+        latent: cleanLatent(d.latent),
     };
 }
 
 function sync(node) {
     const w = node.widgets?.find((w) => w.name === STATE);
     const A = node.__a;
-    if (w) w.value = JSON.stringify({ main_label: A.main_label, main_loras: A.main_loras, main_vae: A.main_vae, main_clip_skip: A.main_clip_skip, slots: A.slots });
+    if (w) w.value = JSON.stringify({ main_label: A.main_label, main_loras: A.main_loras, main_vae: A.main_vae, main_clip_skip: A.main_clip_skip, slots: A.slots, latent: A.latent });
 }
 
 function newLora() {
@@ -124,7 +146,7 @@ function bodyHeight(node) {
     if (!A) return ROW_H; // body widget only mounts after __a is set; this is just belt-and-suspenders
     let h = TOP + cardHeight(A.main_loras, nExtras(A.main_vae, A.main_clip_skip)) + GAP;
     for (const s of A.slots) h += cardHeight(s.loras, s.on ? nExtras(s.vae, s.clip_skip) : 0) + GAP;
-    return h + ADD_H;
+    return h + ADD_H + GAP + LAT_H;
 }
 
 function resize(node) {
@@ -387,6 +409,36 @@ function drawUp(ctx, cx, cy, col) {
     ctx.strokeStyle = col; ctx.lineWidth = 1.3;
     ctx.beginPath(); ctx.moveTo(cx, cy + 4); ctx.lineTo(cx, cy - 4); ctx.moveTo(cx - 3, cy - 1); ctx.lineTo(cx, cy - 4); ctx.lineTo(cx + 3, cy - 1); ctx.stroke();
 }
+function drawFrame(ctx, cx, mid, col) {
+    ctx.strokeStyle = col; ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.roundRect(cx - 6, mid - 5, 12, 10, 2); ctx.stroke();
+    ctx.lineWidth = 1.1;
+    ctx.beginPath(); ctx.moveTo(cx - 4, mid + 3); ctx.lineTo(cx - 1, mid - 1); ctx.lineTo(cx + 1.5, mid + 1.5); ctx.lineTo(cx + 4, mid - 2); ctx.stroke();
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(cx + 2.5, mid - 2.5, 1, 0, Math.PI * 2); ctx.fill();
+}
+function drawGrid(ctx, cx, mid, col) {
+    ctx.strokeStyle = col; ctx.lineWidth = 1.1;
+    ctx.beginPath(); ctx.roundRect(cx - 4, mid - 4, 8, 8, 1.5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, mid - 4); ctx.lineTo(cx, mid + 4); ctx.moveTo(cx - 4, mid); ctx.lineTo(cx + 4, mid); ctx.stroke();
+}
+function drawAspect(ctx, rx, mid, w, h) {
+    const label = ratio(w, h);
+    ctx.font = "11px 'Hanken Grotesk', Arial"; ctx.fillStyle = C.dim; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    ctx.fillText(label, rx, mid);
+    const lw = ctx.measureText(label).width, maxd = 15;
+    const bw = w >= h ? maxd : maxd * w / h, bh = w >= h ? maxd * h / w : maxd;
+    const bx = rx - lw - 8 - bw, by = mid - bh / 2;
+    ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 2);
+    ctx.fillStyle = "rgba(255,107,92,0.10)"; ctx.fill();
+    ctx.lineWidth = 1.2; ctx.strokeStyle = C.accent; ctx.stroke();
+}
+function drawNumBox(ctx, x, mid, w, h, val, hot) {
+    ctx.beginPath(); ctx.roundRect(x, mid - h / 2, w, h, 7);
+    ctx.fillStyle = C.inset; ctx.fill();
+    ctx.lineWidth = 1; ctx.strokeStyle = hot ? "rgba(255,255,255,0.28)" : C.stroke; ctx.stroke();
+    ctx.fillStyle = C.gold; ctx.font = "600 13px 'Bricolage Grotesque', Arial"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(String(val), x + w / 2, mid);
+}
 
 // the ‹ value › pill. box stays solid; arrows+value dim to `alpha` (a lora row fades when off).
 // zones: dec (left arrow) / type (middle, click-to-enter) / inc (right arrow).
@@ -594,6 +646,68 @@ function drawAdd(ctx, node, width, cy, zones, hx, hy) {
     zones.push({ x0, y0: cy, x1, y1: cy + ADD_H, fn: (e) => addMenu(node, e) });
 }
 
+function drawPresetPill(ctx, node, x, cy, hx, hy) {
+    const w = 80, h = 20, y = cy + (LAT_CTL_H - h) / 2;
+    const hot = inZone(hx, hy, x, y, x + w, y + h);
+    const cx = x + w / 2, mid = y + h / 2;
+    scaled(ctx, tap(node, cx, mid), cx, mid, () => {
+        ctx.beginPath(); ctx.roundRect(x, y, w, h, h / 2);
+        ctx.fillStyle = hot ? "rgba(255,107,92,0.10)" : "rgba(255,255,255,0.04)"; ctx.fill();
+        ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+        ctx.strokeStyle = hot ? "rgba(255,107,92,0.4)" : "rgba(255,255,255,0.18)"; ctx.stroke();
+        ctx.setLineDash([]);
+        drawGrid(ctx, x + 13, mid, hot ? C.accent : C.dim);
+        ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillStyle = hot ? "#ffd0c8" : C.txt; ctx.font = "600 12px 'Hanken Grotesk', Arial";
+        ctx.fillText("presets", x + 23, mid);
+    });
+    return { x0: x, y0: y, x1: x + w, y1: y + h };
+}
+
+function drawLatent(ctx, node, width, cy, zones, hx, hy) {
+    const L = node.__a.latent;
+    const x0 = M, x1 = width - M;
+    ctx.beginPath(); ctx.roundRect(x0, cy, x1 - x0, LAT_H, 12);
+    ctx.fillStyle = "rgba(255,255,255,0.035)"; ctx.fill();
+    ctx.lineWidth = 1; ctx.strokeStyle = C.stroke; ctx.stroke();
+
+    const cl = x0 + 12, cr = x1 - 11;
+    const headMid = cy + HEAD_H / 2;
+    drawFrame(ctx, cl + 5, headMid, C.accent);
+    ctx.textBaseline = "middle"; ctx.textAlign = "left"; ctx.font = "600 13px 'Bricolage Grotesque', Arial"; ctx.fillStyle = C.txt;
+    ctx.fillText("canvas", cl + 18, headMid);
+    drawAspect(ctx, cr, headMid, L.width, L.height);
+
+    const dimY = cy + HEAD_H, dimMid = dimY + LAT_DIM_H / 2;
+    const boxW = 66, boxH = 24, gap = 26, totalW = boxW * 2 + gap;
+    const wbx = (x0 + x1) / 2 - totalW / 2, hbx = wbx + boxW + gap;
+    drawNumBox(ctx, wbx, dimMid, boxW, boxH, L.width, inZone(hx, hy, wbx, dimMid - 12, wbx + boxW, dimMid + 12));
+    zones.push({ x0: wbx, y0: dimMid - 12, x1: wbx + boxW, y1: dimMid + 12, fn: (e) => app.canvas.prompt("Width", L.width, (v) => { L.width = snapDim(v); commit(node); }, e) });
+    ctx.fillStyle = C.dim; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.font = "13px 'Hanken Grotesk', Arial";
+    ctx.fillText("×", wbx + boxW + gap / 2, dimMid);
+    drawNumBox(ctx, hbx, dimMid, boxW, boxH, L.height, inZone(hx, hy, hbx, dimMid - 12, hbx + boxW, dimMid + 12));
+    zones.push({ x0: hbx, y0: dimMid - 12, x1: hbx + boxW, y1: dimMid + 12, fn: (e) => app.canvas.prompt("Height", L.height, (v) => { L.height = snapDim(v); commit(node); }, e) });
+
+    const ctlY = dimY + LAT_DIM_H, ctlMid = ctlY + LAT_CTL_H / 2;
+    zones.push({ ...drawPresetPill(ctx, node, cl, ctlY, hx, hy), fn: (e) => chooseDim(node, e) });
+    const sx = cr - 56;
+    drawStepper(ctx, node, sx, ctlMid, ctlMid - ROW_H / 2, String(L.batch), 1, hx, hy, zones,
+        () => { L.batch = Math.max(1, L.batch - 1); commit(node); },
+        (e) => app.canvas.prompt("Batch", L.batch, (v) => { L.batch = Math.max(1, parseInt(v, 10) || 1); commit(node); }, e),
+        () => { L.batch += 1; commit(node); });
+    ctx.fillStyle = C.dim; ctx.textAlign = "right"; ctx.textBaseline = "middle"; ctx.font = "12px 'Hanken Grotesk', Arial";
+    ctx.fillText("batch", sx - 8, ctlMid);
+}
+
+function chooseDim(node, event) {
+    const L = node.__a.latent;
+    const scale = Math.max(1, app.canvas?.ds?.scale ?? 1);
+    const items = SDXL_DIMS.map(([w, h]) => ({
+        content: (L.width === w && L.height === h ? "● " : "") + w + " × " + h + "   " + ratio(w, h),
+        callback: () => { L.width = w; L.height = h; commit(node); },
+    }));
+    new LiteGraph.ContextMenu(items, { event, scale, className: "dark", title: "sdxl dimensions" });
+}
+
 function drawBody(ctx, node, width, y0, w) {
     const A = node.__a;
     const zones = [];
@@ -612,6 +726,7 @@ function drawBody(ctx, node, width, y0, w) {
     });
     node.__rows = rows;
     drawAdd(ctx, node, width, cy, zones, hx, hy);
+    drawLatent(ctx, node, width, cy + ADD_H + GAP, zones, hx, hy);
     if (d) {
         computeDrop(node, d);
         drawDropLine(ctx, width, d.lineY);
