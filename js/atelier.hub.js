@@ -290,6 +290,35 @@ function drawGrip(ctx, x, mid, col) {
 function inZone(hx, hy, x0, y0, x1, y1) {
     return hx >= x0 && hx <= x1 && hy >= y0 && hy <= y1;
 }
+function drawHole(ctx, width, top, h) {
+    ctx.save();
+    ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(255,255,255,0.10)";
+    ctx.beginPath(); ctx.roundRect(M, top, width - 2 * M, h, 12); ctx.stroke();
+    ctx.setLineDash([]); ctx.restore();
+}
+function drawDropLine(ctx, width, y) {
+    if (y == null) return;
+    const x0 = M + 4, x1 = width - M - 4;
+    const g = ctx.createLinearGradient(x0, 0, x1, 0);
+    g.addColorStop(0, "rgba(255,107,92,0)"); g.addColorStop(0.5, C.accent); g.addColorStop(1, "rgba(255,107,92,0)");
+    ctx.save();
+    ctx.shadowColor = C.accent; ctx.shadowBlur = 10;
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.roundRect(x0, y - 1.25, x1 - x0, 2.5, 2); ctx.fill();
+    ctx.restore();
+}
+// first slot whose midpoint sits below the pointer wins the drop; else it lands last
+function computeDrop(node, d) {
+    const rows = node.__rows || [];
+    let before = null, lineY = null;
+    for (const r of rows) {
+        if (r.slot === d.slot) continue;
+        if (d.curY < r.top + r.h / 2) { before = r.slot; lineY = r.top - GAP / 2; break; }
+    }
+    if (lineY === null && rows.length) { const last = rows[rows.length - 1]; lineY = last.top + last.h + GAP / 2; }
+    d.before = before; d.lineY = lineY;
+}
 function drawIco(ctx, node, cx, mid, o) {
     scaled(ctx, tap(node, cx, mid), cx, mid, () => {
         if (o.hot) {
@@ -370,7 +399,7 @@ function drawLoraRow(ctx, node, card, inh, loras, l, li, cl, cr, ry, zones, hx, 
     zones.push({ x0: x, y0: ry + 2, x1: rx - 4, y1: ry + ROW_H - 2, fn: (e) => chooseLora(e, (v) => { if (typeof v === "string") { l.lora = v; commit(node); } }) });
 }
 
-function drawCard(ctx, node, card, width, cy, zones, hx, hy) {
+function drawCard(ctx, node, card, width, cy, zones, hx, hy, floating) {
     const A = node.__a;
     const isMain = card.kind === "main";
     const slot = card.slot;
@@ -381,12 +410,13 @@ function drawCard(ctx, node, card, width, cy, zones, hx, hy) {
     const hover = hy >= cy && hy < cy + h && hx >= x0 && hx <= x1;
 
     // 1px lift, visual only - zones stay at the logical y or the hover boundary flickers
-    ctx.save(); ctx.translate(0, hover ? -1 : 0);
+    ctx.save(); ctx.translate(0, hover && !floating ? -1 : 0);
     ctx.beginPath(); ctx.roundRect(x0, cy, x1 - x0, h, 12);
-    ctx.fillStyle = hover ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.035)";
+    if (floating) { ctx.save(); ctx.shadowColor = "rgba(255,107,92,0.45)"; ctx.shadowBlur = 30; ctx.shadowOffsetY = 12; ctx.fillStyle = "rgba(26,22,38,0.97)"; ctx.fill(); ctx.restore(); }
+    ctx.fillStyle = floating ? "rgba(255,255,255,0.06)" : (hover ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.035)");
     ctx.fill();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = inh ? "rgba(255,211,107,0.22)" : isMain ? "rgba(255,107,92,0.22)" : (hover ? "rgba(255,255,255,0.16)" : C.stroke);
+    ctx.lineWidth = floating ? 1.5 : 1;
+    ctx.strokeStyle = floating ? "rgba(255,107,92,0.55)" : (inh ? "rgba(255,211,107,0.22)" : isMain ? "rgba(255,107,92,0.22)" : (hover ? "rgba(255,255,255,0.16)" : C.stroke));
     ctx.stroke();
     if (isMain || inh) {
         ctx.beginPath(); ctx.roundRect(x0 + 4, cy + 10, 2.5, h - 20, 2);
@@ -400,7 +430,8 @@ function drawCard(ctx, node, card, width, cy, zones, hx, hy) {
 
     let hxp = cl;
     if (!isMain) {
-        drawGrip(ctx, hxp, headMid, C.dim); // ※ placeholder - drag is parked, the grip does nothing on purpose
+        drawGrip(ctx, hxp, headMid, hover ? C.txt : C.dim);
+        zones.push({ x0: hxp - 4, y0: cy + 2, x1: hxp + 12, y1: cy + HEAD_H - 2, drag: slot });
         hxp += 14;
         drawSwitch(ctx, node, slot, hxp, headMid, slot.on);
         zones.push({ x0: hxp, y0: cy + 2, x1: hxp + 24, y1: cy + HEAD_H - 2, fn: () => { slot.on = !slot.on; commit(node); } });
@@ -469,25 +500,63 @@ function drawAdd(ctx, node, width, cy, zones, hx, hy) {
 function drawBody(ctx, node, width, y0, w) {
     const A = node.__a;
     const zones = [];
-    const hov = node.__hover, hx = hov ? hov[0] : -1, hy = hov ? hov[1] : -1;
+    const d = node.__drag;
+    const hov = (node.__hover && !d) ? node.__hover : null, hx = hov ? hov[0] : -1, hy = hov ? hov[1] : -1;
     ctx.save();
     let cy = y0 + TOP;
     cy = drawCard(ctx, node, { kind: "main" }, width, cy, zones, hx, hy) + GAP;
-    A.slots.forEach((s, i) => { cy = drawCard(ctx, node, { kind: "slot", slot: s, i }, width, cy, zones, hx, hy) + GAP; });
+    const rows = [];
+    A.slots.forEach((s, i) => {
+        const top = cy, h = cardHeight(s.loras);
+        if (d && d.slot === s) { drawHole(ctx, width, top, h); cy = top + h; }
+        else cy = drawCard(ctx, node, { kind: "slot", slot: s, i }, width, top, zones, hx, hy);
+        rows.push({ slot: s, i, top, h: cy - top });
+        cy += GAP;
+    });
+    node.__rows = rows;
     drawAdd(ctx, node, width, cy, zones, hx, hy);
+    if (d) {
+        computeDrop(node, d);
+        drawDropLine(ctx, width, d.lineY);
+        const home = rows.find((r) => r.slot === d.slot);
+        if (home) {
+            ctx.save(); ctx.translate(0, d.curY - d.grabY);
+            drawCard(ctx, node, { kind: "slot", slot: d.slot, i: home.i }, width, home.top, [], -1, -1, true);
+            ctx.restore();
+        }
+    }
     ctx.restore();
     w.__zones = zones;
 }
 
+function applyDrop(node, d) {
+    const slots = node.__a.slots;
+    const i = slots.indexOf(d.slot);
+    if (i < 0) return;
+    computeDrop(node, d);
+    slots.splice(i, 1);
+    if (d.before && d.before !== d.slot) {
+        const j = slots.indexOf(d.before);
+        slots.splice(j < 0 ? slots.length : j, 0, d.slot);
+    } else slots.push(d.slot);
+}
+
 function bodyMouse(e, pos, node, w) {
-    // the dispatcher fires this on down, move AND up - only act on the press
-    if (e.type !== "pointerdown" && e.type !== "mousedown") return;
+    const x = pos[0], y = pos[1], t = e.type;
+    const d = node.__drag;
+    if (d) {
+        // litegraph keeps routing move/up here only because the grip's down returned true
+        if (t === "pointermove" || t === "mousemove") { d.curY = y; node.setDirtyCanvas(true, true); return true; }
+        if (t === "pointerup" || t === "mouseup") { d.curY = y; applyDrop(node, d); node.__drag = null; commit(node); return true; }
+        return true;
+    }
+    if (t !== "pointerdown" && t !== "mousedown") return;
     const zs = w.__zones;
     if (!zs) return false;
-    const x = pos[0], y = pos[1];
     for (let i = zs.length - 1; i >= 0; i--) {
         const z = zs[i];
         if (x >= z.x0 && x <= z.x1 && y >= z.y0 && y <= z.y1) {
+            if (z.drag !== undefined) { node.__drag = { slot: z.drag, grabY: y, curY: y, before: null, lineY: null }; keepAnimating(node); return true; }
             node.__tap = { x: (z.x0 + z.x1) / 2, y: (z.y0 + z.y1) / 2, t0: performance.now() };
             keepAnimating(node);
             z.fn(e);
