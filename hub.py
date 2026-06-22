@@ -1,5 +1,4 @@
 import json
-import re
 
 import torch
 import folder_paths
@@ -7,6 +6,7 @@ import comfy.model_management
 from nodes import MAX_RESOLUTION
 
 from .loader import load_checkpoint, apply_loras, apply_overrides
+from .encode import encode_prompt
 
 
 class AtelierHub:
@@ -36,12 +36,13 @@ class AtelierHub:
         glb = state["globals"]
         lat = next((g for g in glb if g["kind"] == "latent"), None)
         pr = next((g for g in glb if g["kind"] == "prompt"), None)
-        pos = _encode(clip, pr["positive"] if pr else "")
-        neg = _encode(clip, pr["negative"] if pr else "")
+        pos_text = pr["positive"] if pr else ""
+        neg_text = pr["negative"] if pr else ""
         print(f"[atelier] hub roster: {[e['ckpt'] for e in roster]}")
         palette = {"model": model, "clip": clip, "vae": vae,
-                   "positive": pos, "negative": neg, "latent": _make_latent(lat),
-                   "roster": roster}
+                   "positive": encode_prompt(clip, pos_text), "negative": encode_prompt(clip, neg_text),
+                   "positive_text": pos_text, "negative_text": neg_text,
+                   "latent": _make_latent(lat), "roster": roster}
         return (palette,)
 
 
@@ -73,23 +74,6 @@ def _parse_state(raw):
         "slots": slots,
         "globals": _clean_globals(data),
     }
-
-
-def _encode(clip, text):
-    chunks = [c for c in (s.strip() for s in re.split(r"\s*\bBREAK\b\s*", text or "")) if c]
-    if not chunks:
-        return clip.encode_from_tokens_scheduled(clip.tokenize(""))
-    out = clip.encode_from_tokens_scheduled(clip.tokenize(chunks[0]))
-    for c in chunks[1:]:
-        out = _concat(out, clip.encode_from_tokens_scheduled(clip.tokenize(c)))
-    return out
-
-
-def _concat(cond_to, cond_from):
-    # BREAK glues the next chunk onto every existing cond along the token axis - this is comfy's own
-    # ConditioningConcat, inlined so a BREAK in the prompt doesn't need a node wired downstream
-    src = cond_from[0][0]
-    return [[torch.cat((t[0], src), 1), t[1].copy()] for t in cond_to]
 
 
 def _clean_globals(data):

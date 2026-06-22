@@ -7,6 +7,10 @@ INTEROP = [
     ("latent", "LATENT"),
     ("images", "IMAGE"),
     ("seed", "INT"),
+    # appended, never inserted - cart saves wires by slot index, so a key in the middle would
+    # re-point latent/images/seed in already-saved workflows
+    ("positive_text", "STRING"),
+    ("negative_text", "STRING"),
 ]
 
 
