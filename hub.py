@@ -6,7 +6,7 @@ import comfy.model_management
 from nodes import MAX_RESOLUTION
 
 from .loader import load_checkpoint, apply_loras, apply_overrides
-from .encode import encode_prompt
+from .encode import encode_prompt, compose_prompts
 
 
 class AtelierHub:
@@ -17,6 +17,7 @@ class AtelierHub:
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
                 "checkpoints": ("STRING", {"default": "", "multiline": False}),
             },
+            "optional": {"swatches": ("SWATCHES",)},
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
@@ -25,7 +26,7 @@ class AtelierHub:
     FUNCTION = "load"
     CATEGORY = "atelier"
 
-    def load(self, ckpt_name, checkpoints="", unique_id=None):
+    def load(self, ckpt_name, checkpoints="", swatches=None, unique_id=None):
         state = _parse_state(checkpoints)
         main = {"ckpt": ckpt_name, "on": True, "loras": state["main_loras"],
                 "vae": state["main_vae"], "clip_skip": state["main_clip_skip"]}
@@ -38,6 +39,7 @@ class AtelierHub:
         pr = next((g for g in glb if g["kind"] == "prompt"), None)
         pos_text = pr["positive"] if pr else ""
         neg_text = pr["negative"] if pr else ""
+        pos_text, neg_text = compose_prompts(pos_text, neg_text, swatches)
         print(f"[atelier] hub roster: {[e['ckpt'] for e in roster]}")
         palette = {"model": model, "clip": clip, "vae": vae,
                    "positive": encode_prompt(clip, pos_text), "negative": encode_prompt(clip, neg_text),
