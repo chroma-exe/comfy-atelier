@@ -7,6 +7,7 @@ import struct
 import aiohttp
 from aiohttp import web
 
+import comfy.samplers
 import folder_paths
 from server import PromptServer
 
@@ -194,6 +195,14 @@ async def _route_lora_info(request):
     if info is None:
         return web.json_response({"error": f"lora not found: {lora}"}, status=404)
     return web.json_response(info)
+
+
+@PromptServer.instance.routes.get("/atelier/samplers")
+async def _route_samplers(request):
+    return web.json_response({
+        "samplers": comfy.samplers.KSampler.SAMPLERS,
+        "schedulers": comfy.samplers.KSampler.SCHEDULERS,
+    })
 
 
 @PromptServer.instance.routes.get("/atelier/lora-img")

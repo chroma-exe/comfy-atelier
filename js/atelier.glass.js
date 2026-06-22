@@ -181,6 +181,29 @@ export function drawIco(ctx, node, cx, mid, o) {
     });
 }
 
+// --- the rotary dial - pure paint; the drag-to-turn lives in whatever node wears it. ---
+export function drawKnob(ctx, cx, cy, r, o) {
+    const a0 = Math.PI * 0.75, sweep = Math.PI * 1.5;
+    const f = Math.max(0, Math.min(1, (o.value - o.min) / (o.max - o.min)));
+    ctx.lineCap = "round"; ctx.lineWidth = 3;
+    ctx.strokeStyle = "rgba(255,255,255,0.10)";
+    ctx.beginPath(); ctx.arc(cx, cy, r, a0, a0 + sweep); ctx.stroke();
+    if (f > 0.001) {
+        ctx.save();
+        ctx.shadowColor = C.accent; ctx.shadowBlur = o.active ? 12 : (o.hot ? 8 : 5);
+        ctx.strokeStyle = grad(ctx, cx - r, cy, r * 2, 0, C.accent, "#ff8f5c");
+        ctx.beginPath(); ctx.arc(cx, cy, r, a0, a0 + sweep * f); ctx.stroke();
+        ctx.restore();
+    }
+    ctx.beginPath(); ctx.arc(cx, cy, r - 5, 0, Math.PI * 2);
+    ctx.fillStyle = (o.hot || o.active) ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.20)"; ctx.fill();
+    ctx.fillStyle = C.txt; ctx.font = "600 13px 'Bricolage Grotesque', Arial";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(o.fmt(o.value), cx, cy + 0.5);
+    ctx.fillStyle = (o.hot || o.active) ? C.txt : C.dim; ctx.font = "600 9px 'Hanken Grotesk', Arial";
+    ctx.fillText(o.label, cx, cy + r + 9);
+}
+
 // --- the card shell every node's cards sit in. pass `accent` for a left tab of color. ---
 export function cardShell(ctx, node, opts) {
     const { x0, x1, cy, h, hover, floating, accent } = opts;
