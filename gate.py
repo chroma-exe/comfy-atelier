@@ -8,7 +8,7 @@ class AtelierPassGate:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "roster": ("ROSTER",),
+                "palette": ("PALETTE",),
                 "slot": ("INT", {"default": 1, "min": 0, "max": 63}),
                 "free_vram_first": ("BOOLEAN", {"default": True}),
             },
@@ -29,7 +29,8 @@ class AtelierPassGate:
     def VALIDATE_INPUTS(cls, input_types):
         return True
 
-    def load_slot(self, roster, slot, free_vram_first=True, run_after=None):
+    def load_slot(self, palette, slot, free_vram_first=True, run_after=None):
+        roster = (palette or {}).get("roster", [])
         if not 0 <= slot < len(roster):
             raise ValueError(f"pass gate: slot {slot} out of range (roster holds {len(roster)} checkpoint(s))")
         entry = roster[slot]

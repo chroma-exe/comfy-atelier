@@ -20,8 +20,8 @@ class AtelierHub:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "ROSTER", "LATENT", "CONDITIONING", "CONDITIONING")
-    RETURN_NAMES = ("model", "clip", "vae", "roster", "latent", "positive", "negative")
+    RETURN_TYPES = ("PALETTE",)
+    RETURN_NAMES = ("palette",)
     FUNCTION = "load"
     CATEGORY = "atelier"
 
@@ -39,7 +39,10 @@ class AtelierHub:
         pos = _encode(clip, pr["positive"] if pr else "")
         neg = _encode(clip, pr["negative"] if pr else "")
         print(f"[atelier] hub roster: {[e['ckpt'] for e in roster]}")
-        return (model, clip, vae, roster, _make_latent(lat), pos, neg)
+        palette = {"model": model, "clip": clip, "vae": vae,
+                   "positive": pos, "negative": neg, "latent": _make_latent(lat),
+                   "roster": roster}
+        return (palette,)
 
 
 def _parse_state(raw):
