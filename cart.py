@@ -5,6 +5,10 @@ _FORCE = {"INT", "FLOAT", "STRING"}
 
 
 class AtelierCart:
+    DESCRIPTION = ("the pipe. taps typed wires (model/clip/vae/cond/latent/images/seed/text) out of the palette "
+                   "and merges any wired back in - re-encodes the prompt on a text edit, and reports the latent's "
+                   "width/height.")
+
     @classmethod
     def INPUT_TYPES(cls):
         optional = {"palette": ("PALETTE",)}

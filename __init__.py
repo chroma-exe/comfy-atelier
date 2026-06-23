@@ -1,5 +1,5 @@
 from .hub import AtelierHub
-from .gate import AtelierPassGate
+from .press import AtelierPress
 from .cart import AtelierCart
 from .swatches import AtelierSwatches
 from .dials import AtelierDials
@@ -7,7 +7,7 @@ from . import info  # noqa: F401 - imported for its side effect: registers the /
 
 NODE_CLASS_MAPPINGS = {
     "AtelierHub": AtelierHub,
-    "AtelierPassGate": AtelierPassGate,
+    "AtelierPress": AtelierPress,
     "AtelierCart": AtelierCart,
     "AtelierSwatches": AtelierSwatches,
     "AtelierDials": AtelierDials,
@@ -15,7 +15,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AtelierHub": "Atelier Hub",
-    "AtelierPassGate": "Atelier Pass Gate",
+    "AtelierPress": "Atelier Press (KSampler)",
     "AtelierCart": "Atelier Cart",
     "AtelierSwatches": "Atelier Swatches",
     "AtelierDials": "Atelier Dials",

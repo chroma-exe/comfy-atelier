@@ -10,6 +10,9 @@ _DEF_SCHED = "normal" if "normal" in _SCHEDULERS else _SCHEDULERS[0]
 
 
 class AtelierDials:
+    DESCRIPTION = ("the sampler controls. one card per pass writes steps/cfg/denoise/sampler/scheduler/seed into "
+                   "the palette for the press to read; card 1's seed is the baseline a cart taps.")
+
     @classmethod
     def INPUT_TYPES(cls):
         return {

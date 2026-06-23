@@ -1,6 +1,6 @@
 [project]
 name = "comfy-atelier"
-version = "0.6.0"
+version = "0.7.0"
 description = "koma's comfy atelier - a ComfyUI node pack with progressive-disclosure, glassmorphism nodes"
 readme = "README.md"
 license = { file = "LICENSE" }

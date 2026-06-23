@@ -10,6 +10,10 @@ from .encode import encode_prompt, compose_prompts
 
 
 class AtelierHub:
+    DESCRIPTION = ("the loader. holds the checkpoint roster, bakes its loras/vae/clip-skip and the prompt, and "
+                   "emits one PALETTE wire that every other atelier node reads from. tap typed wires back out "
+                   "with a cart.")
+
     @classmethod
     def INPUT_TYPES(cls):
         return {

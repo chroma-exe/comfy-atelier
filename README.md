@@ -20,7 +20,7 @@ everything optional rides behind a `+ Add` menu, so the node stays tiny until yo
 
 **Atelier Cart** - the pipe. the hub hands everything down one wire (a "palette"); the cart is where you tap it back into the sockets vanilla ComfyUI understands, or splice a fresh value into the stream mid-workflow.
 
-**Atelier Pass Gate** - the sequencer. it runs the roster one checkpoint at a time, evicting VRAM between passes, so a 10GB card can juggle several checkpoints in a single graph without choking.
+**Atelier Press** - the sampler. it runs the roster one checkpoint at a time, evicting VRAM between passes and rendering each pass right there, so a 10GB card can juggle several checkpoints in a single graph without choking. dial in a variation seed when you want the same image nudged a hair sideways.
 
 ## north star
 
