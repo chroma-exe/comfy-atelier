@@ -32,7 +32,7 @@ class AtelierPress:
             "optional": {
                 # wire the previous pass's latent/image in here. nothing reads the value - the
                 # data edge IS the point: it's the only thing that makes comfy run this press
-                # after that pass instead of whenever it pleases. see decisions.md
+                # after that pass instead of whenever it pleases
                 "run_after": ("*", {}),
             },
         }

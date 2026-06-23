@@ -1,6 +1,9 @@
 // the atelier canon in code - color tokens, the glass shell every node wears, and the shared card
 // kit (glyphs, animation, drag-reorder, body chrome). new nodes pull from here, not the big hub.
 
+import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
+
 export const C = {
     txt: "#ece9f5", dim: "#9a93b4", accent: "#ff6b5c", gold: "#ffd36b", lilac: "#9d8dff",
     stroke: "rgba(255,255,255,0.10)", inset: "rgba(0,0,0,0.22)",
@@ -73,12 +76,59 @@ function drawGlassShape(node, ctx, size, selected) {
     node.drawTitleBox(ctx, { ...opts, box_size: 10 });
     node.drawTitleText(ctx, { ...opts, default_title_color: "#ffb7ac" });
     node.onDrawTitle?.(ctx);
+
+    if (_running === String(node.id)) { drawRunGlow(ctx, w, top, full, r); keepAnimating(node); }
+    const frac = _progress.get(String(node.id));
+    if (frac != null && !collapsed) drawProgress(ctx, w, frac);
+}
+
+// comfy's own running chrome (progress bar + the live-node border) lives inside the drawNodeShape we
+// skip, so glass nodes lost it. we listen to the same events and repaint both: a coral->gold bar at the
+// title seam (only nodes emitting step progress show one) and a soft coral pulse around whatever's live.
+const _progress = new Map();
+let _running = null;
+let _execWired = false;
+function wireExecution() {
+    if (_execWired || typeof api === "undefined") return;
+    _execWired = true;
+    const reset = (run) => { _running = run; _progress.clear(); app.graph?.setDirtyCanvas(true, true); };
+    api.addEventListener("executing", (e) => reset(e.detail != null ? String(e.detail) : null));
+    api.addEventListener("execution_error", () => reset(null));
+    api.addEventListener("progress", (e) => {
+        const d = e.detail || {};
+        if (!d.max) return;
+        _progress.set(String(d.node), d.value / d.max);
+        app.graph?.getNodeById?.(Number(d.node))?.setDirtyCanvas(true, true);
+    });
+}
+function drawProgress(ctx, w, frac) {
+    const f = Math.max(0, Math.min(1, frac)), pad = 10, trackW = w - pad * 2, by = -4, bh = 3;
+    ctx.save();
+    ctx.beginPath(); ctx.roundRect(pad, by, trackW, bh, bh / 2);
+    ctx.fillStyle = "rgba(255,255,255,0.10)"; ctx.fill();
+    ctx.shadowColor = "rgba(255,107,92,0.7)"; ctx.shadowBlur = 6;
+    ctx.beginPath(); ctx.roundRect(pad, by, Math.max(bh, trackW * f), bh, bh / 2);
+    ctx.fillStyle = grad(ctx, pad, by, trackW, 0, C.accent, C.gold); ctx.fill();
+    ctx.restore();
+}
+// the live-node breath - a coral edge that swells and fades while the node runs. self-sustains via
+// keepAnimating each frame it's drawn, settles the moment _running moves on.
+function drawRunGlow(ctx, w, top, full, r) {
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 240);
+    ctx.save();
+    ctx.beginPath(); ctx.roundRect(0.5, top + 0.5, w - 1, full - 1, r);
+    ctx.strokeStyle = `rgba(255,107,92,${(0.4 + 0.45 * pulse).toFixed(3)})`;
+    ctx.lineWidth = 1.5;
+    ctx.shadowColor = "rgba(255,107,92,0.9)"; ctx.shadowBlur = 7 + 15 * pulse;
+    ctx.stroke();
+    ctx.restore();
 }
 
 let _glassInstalled = false;
 function installGlass() {
     if (_glassInstalled || typeof LGraphCanvas === "undefined") return;
     _glassInstalled = true;
+    wireExecution();
     LGraphCanvas.link_type_colors["PALETTE"] = WIRE;
     const origShape = LGraphCanvas.prototype.drawNodeShape;
     LGraphCanvas.prototype.drawNodeShape = function (node, ctx, size, fgcolor, bgcolor, selected, mouse_over) {
