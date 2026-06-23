@@ -2,7 +2,7 @@ import { app } from "../../scripts/app.js";
 import {
     C, registerGlass, M, GAP, HEAD_H,
     fit, inZone,
-    cardShell, drawSwitch, drawKnob, drawIco, hide, bodyMouse,
+    cardShell, drawSwitch, drawKnob, drawIco, drawPill, hide, bodyMouse,
 } from "./atelier.glass.js";
 
 const CLASS = "AtelierDials";
@@ -60,21 +60,6 @@ function sync(node) {
 // litegraph's computeSize derives width from the title, not our widget - so drive width ourselves
 function fitNode(node) { node.setSize([nodeWidth(node), node.computeSize()[1]]); }
 function commit(node) { sync(node); fitNode(node); node.setDirtyCanvas(true, true); }
-
-function drawPill(ctx, x, y, w, h, label, value, hot) {
-    ctx.beginPath(); ctx.roundRect(x, y, w, h, 8);
-    ctx.fillStyle = hot ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.22)"; ctx.fill();
-    ctx.lineWidth = 1; ctx.strokeStyle = hot ? "rgba(255,255,255,0.18)" : C.stroke; ctx.stroke();
-    const mid = y + h / 2; ctx.textBaseline = "middle"; ctx.textAlign = "left";
-    ctx.font = "600 9px 'Hanken Grotesk', Arial"; ctx.fillStyle = C.dim;
-    ctx.fillText(label, x + 9, mid);
-    const lw = ctx.measureText(label).width;
-    ctx.font = "600 11.5px 'Hanken Grotesk', Arial"; ctx.fillStyle = C.txt;
-    ctx.fillText(fit(ctx, value, w - 24 - lw - 6), x + 9 + lw + 6, mid);
-    ctx.strokeStyle = hot ? C.txt : C.dim; ctx.lineWidth = 1.3;
-    const chx = x + w - 11;
-    ctx.beginPath(); ctx.moveTo(chx - 4, mid - 2); ctx.lineTo(chx, mid + 2); ctx.lineTo(chx + 4, mid - 2); ctx.stroke();
-}
 
 function drawCard(ctx, node, card, i, x, y, zones, knobs, hx, hy) {
     const x0 = x, x1 = x + CARD_W, h = cardH;

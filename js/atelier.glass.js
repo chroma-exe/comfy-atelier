@@ -204,6 +204,46 @@ export function drawKnob(ctx, cx, cy, r, o) {
     ctx.fillText(o.label, cx, cy + r + 9);
 }
 
+// --- the horizontal fill gauge - pure paint; the drag-to-slide / tap-to-type lives in the node. ---
+export function drawGauge(ctx, x, y, w, o) {
+    const f = Math.max(0, Math.min(1, (o.value - o.min) / (o.max - o.min)));
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left"; ctx.font = "600 9px 'Hanken Grotesk', Arial";
+    ctx.fillStyle = (o.hot || o.active) ? C.txt : C.dim;
+    ctx.fillText(o.label, x, y + 6);
+    ctx.textAlign = "right"; ctx.font = "600 12px 'Bricolage Grotesque', Arial";
+    ctx.fillStyle = f > 0.001 ? C.txt : C.dim;
+    ctx.fillText(o.fmt(o.value), x + w, y + 6);
+    const by = y + 16, bh = 10;
+    ctx.beginPath(); ctx.roundRect(x, by, w, bh, bh / 2);
+    ctx.fillStyle = (o.hot || o.active) ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.24)"; ctx.fill();
+    ctx.lineWidth = 1; ctx.strokeStyle = (o.hot || o.active) ? "rgba(255,255,255,0.16)" : C.stroke; ctx.stroke();
+    if (f > 0.001) {
+        ctx.save();
+        ctx.beginPath(); ctx.roundRect(x, by, w, bh, bh / 2); ctx.clip();
+        ctx.shadowColor = C.accent; ctx.shadowBlur = o.active ? 12 : (o.hot ? 8 : 5);
+        ctx.fillStyle = grad(ctx, x, by, w, 0, C.accent, "#ff8f5c");
+        ctx.fillRect(x, by, f * w, bh);
+        ctx.restore();
+    }
+}
+
+// --- the dropdown pill: label + value + chevron, opens a menu. ---
+export function drawPill(ctx, x, y, w, h, label, value, hot) {
+    ctx.beginPath(); ctx.roundRect(x, y, w, h, 8);
+    ctx.fillStyle = hot ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.22)"; ctx.fill();
+    ctx.lineWidth = 1; ctx.strokeStyle = hot ? "rgba(255,255,255,0.18)" : C.stroke; ctx.stroke();
+    const mid = y + h / 2; ctx.textBaseline = "middle"; ctx.textAlign = "left";
+    ctx.font = "600 9px 'Hanken Grotesk', Arial"; ctx.fillStyle = C.dim;
+    ctx.fillText(label, x + 9, mid);
+    const lw = ctx.measureText(label).width;
+    ctx.font = "600 11.5px 'Hanken Grotesk', Arial"; ctx.fillStyle = C.txt;
+    ctx.fillText(fit(ctx, value, w - 24 - lw - 6), x + 9 + lw + 6, mid);
+    ctx.strokeStyle = hot ? C.txt : C.dim; ctx.lineWidth = 1.3;
+    const chx = x + w - 11;
+    ctx.beginPath(); ctx.moveTo(chx - 4, mid - 2); ctx.lineTo(chx, mid + 2); ctx.lineTo(chx + 4, mid - 2); ctx.stroke();
+}
+
 // --- the card shell every node's cards sit in. pass `accent` for a left tab of color. ---
 export function cardShell(ctx, node, opts) {
     const { x0, x1, cy, h, hover, floating, accent } = opts;
