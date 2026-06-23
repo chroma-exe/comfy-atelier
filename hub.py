@@ -3,6 +3,7 @@ import json
 import torch
 import folder_paths
 import comfy.model_management
+import comfy.utils
 from nodes import MAX_RESOLUTION
 
 from .loader import load_checkpoint, apply_loras, apply_overrides
@@ -21,7 +22,7 @@ class AtelierHub:
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
                 "checkpoints": ("STRING", {"default": "", "multiline": False}),
             },
-            "optional": {"swatches": ("SWATCHES",)},
+            "optional": {"swatches": ("SWATCHES",), "image": ("IMAGE",)},
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
@@ -30,7 +31,7 @@ class AtelierHub:
     FUNCTION = "load"
     CATEGORY = "atelier"
 
-    def load(self, ckpt_name, checkpoints="", swatches=None, unique_id=None):
+    def load(self, ckpt_name, checkpoints="", swatches=None, image=None, unique_id=None):
         state = _parse_state(checkpoints)
         main = {"ckpt": ckpt_name, "on": True, "loras": state["main_loras"],
                 "vae": state["main_vae"], "clip_skip": state["main_clip_skip"]}
@@ -45,10 +46,13 @@ class AtelierHub:
         neg_text = pr["negative"] if pr else ""
         pos_text, neg_text = compose_prompts(pos_text, neg_text, swatches)
         print(f"[atelier] hub roster: {[e['ckpt'] for e in roster]}")
+        latent, img2img = _latent_for(lat, vae, image)
         palette = {"model": model, "clip": clip, "vae": vae,
                    "positive": encode_prompt(clip, pos_text), "negative": encode_prompt(clip, neg_text),
                    "positive_text": pos_text, "negative_text": neg_text,
-                   "latent": _make_latent(lat), "roster": roster}
+                   "latent": latent, "roster": roster}
+        if img2img:
+            palette["img2img"] = img2img
         return (palette,)
 
 
@@ -105,7 +109,19 @@ def _clean_globals(data):
 
 def _clean_latent(raw):
     raw = raw or {}
-    return {"width": _dim(raw.get("width")), "height": _dim(raw.get("height")), "batch": _batch(raw.get("batch"))}
+    return {"width": _dim(raw.get("width")), "height": _dim(raw.get("height")), "batch": _batch(raw.get("batch")),
+            "i2i": bool(raw.get("i2i")), "denoise": _denoise(raw.get("denoise")), "resize": _resize(raw.get("resize"))}
+
+
+def _denoise(v):
+    try:
+        return max(0.0, min(1.0, float(v)))
+    except (TypeError, ValueError):
+        return 0.6
+
+
+def _resize(v):
+    return "pad" if v == "pad" else "crop"
 
 
 def _dim(v):
@@ -129,6 +145,30 @@ def _make_latent(cfg):
     # 4-channel latent - right for sd1.5/sdxl. flux & sd3 want 16; revisit if this node ever loads one
     t = torch.zeros([cfg["batch"], 4, cfg["height"] // 8, cfg["width"] // 8], device=comfy.model_management.intermediate_device())
     return {"samples": t}
+
+
+def _latent_for(cfg, vae, image):
+    cfg = cfg or _clean_latent(None)
+    if cfg.get("i2i") and image is not None:
+        pixels = _fit_image(image, cfg["width"], cfg["height"], cfg["resize"])
+        # ※ batch follows the wired image, not the card's batch knob - that one's empty-latent only
+        return {"samples": vae.encode(pixels[:, :, :, :3])}, {"on": True, "denoise": cfg["denoise"]}
+    return _make_latent(cfg), None
+
+
+def _fit_image(image, width, height, mode):
+    samples = image.movedim(-1, 1)  # nhwc -> nchw, the shape comfy's scaler wants
+    if mode == "pad":
+        ih, iw = samples.shape[2], samples.shape[3]
+        scale = min(width / iw, height / ih)
+        nw, nh = max(1, round(iw * scale)), max(1, round(ih * scale))
+        fit = comfy.utils.common_upscale(samples, nw, nh, "bilinear", "disabled")
+        out = torch.zeros(samples.shape[0], samples.shape[1], height, width, dtype=fit.dtype, device=fit.device)
+        top, left = (height - nh) // 2, (width - nw) // 2
+        out[:, :, top:top + nh, left:left + nw] = fit
+    else:
+        out = comfy.utils.common_upscale(samples, width, height, "bilinear", "center")
+    return out.movedim(1, -1)
 
 
 def _clean_skip(raw):

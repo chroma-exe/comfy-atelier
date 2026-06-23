@@ -87,12 +87,13 @@ function cleanSkip(v) {
     return typeof v === "number" ? v : null;
 }
 function dimOf(v) { return typeof v === "number" ? v : 1024; }
+function clampDn(v) { const n = Number(v); return Number.isFinite(n) ? Math.max(0, Math.min(1, Math.round(n * 100) / 100)) : 0.6; }
 function taH(v) { return typeof v === "number" && v >= TA_MIN ? v : TA_DEFAULT; }
 
 function cleanGlobals(arr) {
     const out = [];
     for (const g of arr ?? []) {
-        if (g.kind === "latent") out.push({ kind: "latent", width: dimOf(g.width), height: dimOf(g.height), batch: typeof g.batch === "number" ? g.batch : 1 });
+        if (g.kind === "latent") out.push({ kind: "latent", width: dimOf(g.width), height: dimOf(g.height), batch: typeof g.batch === "number" ? g.batch : 1, i2i: !!g.i2i, denoise: clampDn(g.denoise), resize: g.resize === "pad" ? "pad" : "crop" });
         else if (g.kind === "prompt") out.push({ kind: "prompt", positive: g.positive ?? "", negative: g.negative ?? "", ph: taH(g.ph), nh: taH(g.nh) });
     }
     return out;
@@ -154,9 +155,9 @@ function nExtras(vae, skip) {
 function cardHeight(loras, extras) {
     return HEAD_H + CK_H + extras * ROW_H + loras.length * ROW_H + PADB;
 }
-function latentHeight() { return HEAD_H + LAT_DIM_H + LAT_CTL_H + PADB; }
+function latentHeight(g) { return HEAD_H + LAT_DIM_H + LAT_CTL_H + (g?.i2i ? LAT_CTL_H : 0) + PADB; }
 function promptHeight(g) { return HEAD_H + taH(g.ph) + TA_GAP + taH(g.nh) + PADB; }
-function globalHeight(g) { return g.kind === "latent" ? latentHeight() : promptHeight(g); }
+function globalHeight(g) { return g.kind === "latent" ? latentHeight(g) : promptHeight(g); }
 
 function bodyHeight(node) {
     const A = node.__a;
@@ -461,7 +462,7 @@ function drawCard(ctx, node, card, width, cy, zones, hx, hy, floating) {
 
 function drawLatentCard(ctx, node, g, width, cy, zones, hx, hy, floating) {
     const A = node.__a;
-    const h = latentHeight();
+    const h = latentHeight(g);
     const x0 = M, x1 = width - M;
     const hover = hy >= cy && hy < cy + h && hx >= x0 && hx <= x1;
     ctx.save(); ctx.translate(0, hover && !floating ? -1 : 0);
@@ -474,6 +475,12 @@ function drawLatentCard(ctx, node, g, width, cy, zones, hx, hy, floating) {
     drawFrame(ctx, hxp + 3, headMid, C.accent); hxp += 14;
     ctx.textBaseline = "middle"; ctx.textAlign = "left"; ctx.font = "600 13px 'Bricolage Grotesque', Arial"; ctx.fillStyle = C.txt;
     ctx.fillText("canvas", hxp, headMid);
+    let mx = hxp + ctx.measureText("canvas").width + 12;
+    ctx.font = "600 10px 'Hanken Grotesk', Arial"; ctx.fillStyle = g.i2i ? C.accent : C.dim;
+    ctx.fillText("img2img", mx, headMid);
+    const swX = mx + ctx.measureText("img2img").width + 6;
+    drawSwitch(ctx, node, g, swX, headMid, g.i2i);
+    zones.push({ x0: mx - 4, y0: cy + 2, x1: swX + 28, y1: cy + HEAD_H - 2, fn: () => { g.i2i = !g.i2i; commit(node); } });
     drawAspect(ctx, cr - 22, headMid, g.width, g.height);
     const xHot = inZone(hx, hy, cr - 16, cy + 2, cr, cy + HEAD_H - 2);
     drawIco(ctx, node, cr - 7, headMid, { a: hover ? 1 : 0.4, hot: xHot, kind: "x", danger: true, rot: anim(node, g, "spin", xHot ? 1 : 0, 220) });
@@ -498,8 +505,34 @@ function drawLatentCard(ctx, node, g, width, cy, zones, hx, hy, floating) {
         () => { g.batch += 1; commit(node); });
     ctx.fillStyle = C.dim; ctx.textAlign = "right"; ctx.textBaseline = "middle"; ctx.font = "12px 'Hanken Grotesk', Arial";
     ctx.fillText("batch", sx - 8, ctlMid);
+
+    if (g.i2i) {
+        const r2 = ctlY + LAT_CTL_H, r2mid = r2 + LAT_CTL_H / 2;
+        zones.push({ ...drawModePill(ctx, cl, r2, g.resize, hx, hy), fn: () => { g.resize = g.resize === "pad" ? "crop" : "pad"; commit(node); } });
+        const dsx = cr - 56;
+        drawStepper(ctx, node, dsx, r2mid, r2mid - ROW_H / 2, g.denoise.toFixed(2), 1, hx, hy, zones,
+            () => { g.denoise = clampDn(g.denoise - 0.05); commit(node); },
+            (e) => app.canvas.prompt("Denoise", g.denoise.toFixed(2), (v) => { g.denoise = clampDn(parseFloat(v)); commit(node); }, e),
+            () => { g.denoise = clampDn(g.denoise + 0.05); commit(node); });
+        ctx.fillStyle = C.dim; ctx.textAlign = "right"; ctx.textBaseline = "middle"; ctx.font = "12px 'Hanken Grotesk', Arial";
+        ctx.fillText("denoise", dsx - 8, r2mid);
+    }
     ctx.restore();
     return cy + h;
+}
+
+function drawModePill(ctx, x, cy, mode, hx, hy) {
+    const w = 78, h = 20, y = cy + (LAT_CTL_H - h) / 2;
+    const hot = inZone(hx, hy, x, y, x + w, y + h);
+    ctx.beginPath(); ctx.roundRect(x, y, w, h, h / 2);
+    ctx.fillStyle = hot ? "rgba(255,107,92,0.10)" : "rgba(255,255,255,0.04)"; ctx.fill();
+    ctx.lineWidth = 1; ctx.strokeStyle = hot ? "rgba(255,107,92,0.4)" : C.stroke; ctx.stroke();
+    ctx.textBaseline = "middle"; ctx.textAlign = "left";
+    ctx.fillStyle = C.dim; ctx.font = "600 9px 'Hanken Grotesk', Arial";
+    ctx.fillText("FIT", x + 10, y + h / 2);
+    ctx.fillStyle = hot ? "#ffd0c8" : C.txt; ctx.font = "600 12px 'Hanken Grotesk', Arial";
+    ctx.fillText(mode, x + 32, y + h / 2);
+    return { x0: x, y0: y, x1: x + w, y1: y + h };
 }
 
 function drawPromptCard(ctx, node, g, width, cy, zones, hx, hy, floating) {

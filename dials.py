@@ -32,6 +32,11 @@ class AtelierDials:
         if cards:
             # a sentinel only reaches here on an api run with no frontend to resolve it - never sample -1
             out["seed"] = _resolve(cards[0].get("seed"))
+            i2i = (palette or {}).get("img2img")
+            if i2i and i2i.get("on"):
+                # the first pass is the img2img pass; its denoise bows to the hub's, where the
+                # "how much of this picture do i keep" knob lives. later passes keep their own.
+                cards[0]["denoise"] = i2i["denoise"]
         return (out,)
 
 

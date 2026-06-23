@@ -30,6 +30,36 @@ function loadOptions() {
     return _opts;
 }
 
+// img2img deference: card 1's denoise bows to the hub's when img2img is on upstream. the backend
+// does the override (dials.py); this is so the knob shows the real value instead of lying. we walk
+// the palette wire back through any atelier node until we hit the hub that owns the i2i toggle.
+const PALETTE_NODES = new Set(["AtelierHub", "AtelierCart", "AtelierDials", "AtelierPress"]);
+function paletteOrigin(node) {
+    if (!node.getInputNode) return null;
+    let idx = node.findInputSlot ? node.findInputSlot("palette") : -1;
+    if (idx == null || idx < 0) idx = (node.inputs ?? []).findIndex((i) => i.type === "PALETTE");
+    return idx >= 0 ? node.getInputNode(idx) : null;
+}
+function upstreamI2I(node, depth = 0) {
+    if (depth > 16) return null;
+    const src = paletteOrigin(node);
+    if (!src) return null;
+    const cls = src.comfyClass || src.type;
+    if (cls === "AtelierHub") return hubI2I(src);
+    return PALETTE_NODES.has(cls) ? upstreamI2I(src, depth + 1) : null;
+}
+function hubI2I(hub) {
+    // no image wired -> the backend won't encode, so there's nothing to defer to
+    if (!hub.inputs?.find((i) => i.name === "image" && i.link != null)) return null;
+    const raw = hub.widgets?.find((w) => w.name === "checkpoints")?.value;
+    if (!raw) return null;
+    let d; try { d = JSON.parse(raw); } catch { return null; }
+    const lat = (d.globals ?? []).find((g) => g.kind === "latent");
+    if (!lat?.i2i) return null;
+    const dn = Number(lat.denoise);
+    return Number.isFinite(dn) ? Math.max(0, Math.min(1, dn)) : 0.6;
+}
+
 function num(v, def, lo, hi) { const n = Number(v); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : def; }
 function cleanSeed(v) { const n = Number(v); return Number.isFinite(n) && n >= 0 ? Math.floor(n) : RANDOM; }
 function cleanCard(c) {
@@ -61,7 +91,7 @@ function sync(node) {
 function fitNode(node) { node.setSize([nodeWidth(node), node.computeSize()[1]]); }
 function commit(node) { sync(node); fitNode(node); node.setDirtyCanvas(true, true); }
 
-function drawCard(ctx, node, card, i, x, y, zones, knobs, hx, hy) {
+function drawCard(ctx, node, card, i, x, y, zones, knobs, hx, hy, i2iDn) {
     const x0 = x, x1 = x + CARD_W, h = cardH;
     const hover = inZone(hx, hy, x0, y, x1, y + h);
     const { cl, cr, headMid } = cardShell(ctx, node, { x0, x1, cy: y, h, hover, floating: false, accent: C.lilac });
@@ -100,10 +130,16 @@ function drawCard(ctx, node, card, i, x, y, zones, knobs, hx, hy) {
     const bandTop = wy + wh + GAPV, ky = bandTop + 8 + KNOB_R, colW = ww / KNOBS.length;
     KNOBS.forEach((k, j) => {
         const kx = cl + colW * (j + 0.5);
-        const hot = Math.hypot(hx - kx, hy - ky) <= KNOB_R + 8;
+        const locked = i === 0 && k.key === "denoise" && i2iDn != null;
+        const hot = !locked && Math.hypot(hx - kx, hy - ky) <= KNOB_R + 8;
         const s = node.__scrub;
-        drawKnob(ctx, kx, ky, KNOB_R, { value: card[k.key], min: k.min, max: k.max, label: k.label, fmt: k.fmt, hot, active: s?.card === card && s.cfg.key === k.key });
-        knobs.push({ card, cfg: k, cx: kx, cy: ky });
+        ctx.save(); if (locked) ctx.globalAlpha = 0.6;
+        drawKnob(ctx, kx, ky, KNOB_R, { value: locked ? i2iDn : card[k.key], min: k.min, max: k.max, label: k.label, fmt: k.fmt, hot, active: s?.card === card && s.cfg.key === k.key });
+        ctx.restore();
+        if (locked) {
+            ctx.fillStyle = C.lilac; ctx.font = "700 8px 'Hanken Grotesk', Arial"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+            ctx.fillText("i2i", kx, ky - KNOB_R - 4);
+        } else knobs.push({ card, cfg: k, cx: kx, cy: ky });
     });
 
     const py = bandTop + KNOB_BAND + GAPV;
@@ -136,7 +172,8 @@ function drawBody(ctx, node, width, y0, w) {
     ctx.save();
     const y = y0 + TOP;
     let x = M;
-    node.__a.cards.forEach((card, i) => { drawCard(ctx, node, card, i, x, y, zones, knobs, hx, hy); x += CARD_W + GAP; });
+    const i2iDn = upstreamI2I(node);
+    node.__a.cards.forEach((card, i) => { drawCard(ctx, node, card, i, x, y, zones, knobs, hx, hy, i2iDn); x += CARD_W + GAP; });
     drawAddCol(ctx, node, x, y, zones, hx, hy);
     ctx.restore();
     w.__zones = zones; w.__knobs = knobs;
